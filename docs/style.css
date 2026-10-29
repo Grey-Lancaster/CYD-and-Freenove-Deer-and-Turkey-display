@@ -368,3 +368,12 @@ body {
 .footer a:hover {
   color: #f4c284;
 }
+
+/* every link on the dark page, not just the ones in the help text */
+a {
+  color: #e8a45a;
+}
+
+a:hover {
+  color: #f4c284;
+}
