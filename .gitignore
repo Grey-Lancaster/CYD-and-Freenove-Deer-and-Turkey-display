@@ -1,0 +1,15 @@
+.pio/
+.vscode/
+__pycache__/
+*.pyc
+dist/
+
+# the full source recording (32 MB, CC BY 4.0, see README credits): only the generated loops in src/ are used
+/*.wav
+
+# local notes and board captures (they contain LAN addresses and personal boards)
+TODO.md
+design/screenshot*.png
+design/fishtank_clock.png
+design/ambience_preview.wav
+design/_frames/
