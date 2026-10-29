@@ -1,3 +1,9 @@
+## Easiest: the web installer
+
+### [➡ Open the Web Installer](https://grey-lancaster.github.io/CYD-and-Freenove-Deer-and-Turkey-display/)
+
+Use **Chrome or Edge on a computer**, plug the board in by USB, pick your board in the list and click Connect, then Flash. (Freenove boards: hold BOOT, tap RESET, release BOOT first; press RESET after flashing.) No software to install. The files below are for updating a board that is already running, or for flashing by hand.
+
 ## Pick your board
 
 | Build | Board | Display |
