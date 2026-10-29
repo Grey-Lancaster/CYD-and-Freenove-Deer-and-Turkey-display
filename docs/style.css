@@ -358,3 +358,13 @@ body {
   gap: 8px;
   margin-top: 20px;
 }
+
+.step-help a,
+.footer a {
+  color: #e8a45a;
+}
+
+.step-help a:hover,
+.footer a:hover {
+  color: #f4c284;
+}
