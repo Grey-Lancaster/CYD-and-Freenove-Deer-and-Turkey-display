@@ -44,3 +44,6 @@ All four envs compile. Run on a Freenove 2.8" and a one-USB CYD (ILI9341) by the
 
 ## Credits
 The woods ambience is derived from "Rural Pennsylvania wooded ambience background with wild turkeys, Carolina wren, American crow" by **Jon5515** ([freesound.org/s/871327](https://freesound.org/s/871327/)), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Changes: the first 25 seconds, mixed to mono, noise-reduced, with the cricket band filtered out, looped with a crossfade (`design/make_ambience.py`). The CYD copy is also downsampled to 11.025 kHz to fit in flash.
+
+## License
+The code is released under the [MIT License](LICENSE). Two parts keep their own licenses: the ES8311 audio codec driver (`src/es8311*`, Apache-2.0, Espressif) and the FT6336U touch library (`lib_freenove/`, MIT, aselectroworks). The woods ambience loop (`src/ambience.raw`, `src/ambience.wav`) is derived from a recording by Jon5515 and stays under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); see Credits.
