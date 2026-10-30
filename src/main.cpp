@@ -22,7 +22,11 @@
 #include "wifi_setup.h"
 #include "audio.h"
 
-#define FW_VERSION "1.1.1"
+// On-screen language: English or Spanish (chosen on the first WiFi screen, or with EN/ES on the web page).
+// Spanish is plain ASCII on the screen (the built-in fonts have no accents).
+static inline bool es() { return wifiLangEs(); }
+
+#define FW_VERSION "1.1.7"
 
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite frame = TFT_eSprite(&tft);    // Freenove: the whole frame
@@ -661,8 +665,8 @@ static void drawHunter(float t) {
     }
     if (h.since < 0.5f) {
       cv.setTextDatum(MC_DATUM);
-      cv.setTextColor(RGB(60, 30, 10)); cv.drawString("BANG!", h.sx + h.dir * 30 + 1, h.sy - 22 + 1, FONT_BIG);
-      cv.setTextColor(RGB(255, 236, 140)); cv.drawString("BANG!", h.sx + h.dir * 30, h.sy - 22, FONT_BIG);
+      cv.setTextColor(RGB(60, 30, 10)); cv.drawString(es() ? "PUM!" : "BANG!", h.sx + h.dir * 30 + 1, h.sy - 22 + 1, FONT_BIG);
+      cv.setTextColor(RGB(255, 236, 140)); cv.drawString(es() ? "PUM!" : "BANG!", h.sx + h.dir * 30, h.sy - 22, FONT_BIG);
     }
   }
 }
@@ -696,13 +700,19 @@ static void clockStrings(char *buf, size_t bn, char *date, size_t dn) {
   struct tm tmv;
   if (getLocalTime(&tmv, 0)) {
     h = tmv.tm_hour; mi = tmv.tm_min;
-    static const char *dnm[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-    static const char *mnm[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    static const char *dnE[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    static const char *dnS[] = {"Dom", "Lun", "Mar", "Mie", "Jue", "Vie", "Sab"};
+    static const char *mnE[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    static const char *mnS[] = {"Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"};
+    const char **dnm = es() ? dnS : dnE, **mnm = es() ? mnS : mnE;
     switch (g_datefmt) {
       case 0: snprintf(date, dn, "%s %02d/%02d/%02d", dnm[tmv.tm_wday], tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_year % 100); break;
       case 1: snprintf(date, dn, "%s %02d/%02d/%02d", dnm[tmv.tm_wday], tmv.tm_mday, tmv.tm_mon + 1, tmv.tm_year % 100); break;
       case 2: snprintf(date, dn, "%s %04d-%02d-%02d", dnm[tmv.tm_wday], tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday); break;
-      case 3: snprintf(date, dn, "%s, %s %d", dnm[tmv.tm_wday], mnm[tmv.tm_mon], tmv.tm_mday); break;
+      case 3:
+        if (es()) snprintf(date, dn, "%s, %d %s", dnm[tmv.tm_wday], tmv.tm_mday, mnm[tmv.tm_mon]);
+        else snprintf(date, dn, "%s, %s %d", dnm[tmv.tm_wday], mnm[tmv.tm_mon], tmv.tm_mday);
+        break;
       default: break;
     }
   } else {
@@ -851,7 +861,7 @@ static void drawAlarmScreen(float t, uint32_t now) {
   drawDigits(VW / 2, 80, 78, h12, mm, g_h24, colon, RGB(255, 244, 205));
   cv.setTextDatum(TC_DATUM);
   if (ap) { cv.setTextColor(RGB(255, 244, 205)); cv.drawString(ap + 1, VW / 2, 166, 4); }
-  cv.setTextColor(RGB(255, 255, 255)); cv.drawString("Time to get up!", VW / 2, 28, 4);
+  cv.setTextColor(RGB(255, 255, 255)); cv.drawString(es() ? "Hora de levantarse!" : "Time to get up!", VW / 2, 28, 4);
   cv.fillRoundRect(BTN_SNZ_X, BTN_Y, BTN_W, BTN_H, 12, RGB(120, 80, 36));
   cv.fillRoundRect(BTN_STOP_X, BTN_Y, BTN_W, BTN_H, 12, RGB(176, 44, 34));
   cv.drawRoundRect(BTN_SNZ_X, BTN_Y, BTN_W, BTN_H, 12, RGB(244, 200, 84));
@@ -860,9 +870,9 @@ static void drawAlarmScreen(float t, uint32_t now) {
   cv.setTextDatum(MC_DATUM);
   char sb[16];
   snprintf(sb, sizeof(sb), "%d min", g_alSnz);
-  cv.drawString("Snooze", BTN_SNZ_X + BTN_W / 2, BTN_Y + 20, 4);
+  cv.drawString(es() ? "Posponer" : "Snooze", BTN_SNZ_X + BTN_W / 2, BTN_Y + 20, 4);
   cv.drawString(sb, BTN_SNZ_X + BTN_W / 2, BTN_Y + 43, 2);
-  cv.drawString("Stop", BTN_STOP_X + BTN_W / 2, BTN_Y + BTN_H / 2, 4);
+  cv.drawString(es() ? "Detener" : "Stop", BTN_STOP_X + BTN_W / 2, BTN_Y + BTN_H / 2, 4);
 }
 
 // On-screen alarm setter: tap the time in the corner.
@@ -873,7 +883,7 @@ static void drawAlarmPanel() {
   cv.drawRoundRect(70, 22, 340, 276, 14, acc);
   cv.setTextDatum(TC_DATUM);
   cv.setTextColor(fg);
-  cv.drawString("Alarm clock", 240, 32, 4);
+  cv.drawString(es() ? "Despertador" : "Alarm clock", 240, 32, 4);
   float x0, hC, mC;
   digitsGeom(240, PANEL_DIG_H, x0, hC, mC);
   const int h24 = g_alMin / 60, mm = g_alMin % 60;
@@ -891,11 +901,11 @@ static void drawAlarmPanel() {
   }
   cv.setTextDatum(MC_DATUM);
   cv.fillRoundRect(90, 244, 130, 42, 10, g_alOn ? RGB(50, 128, 66) : RGB(96, 88, 78));
-  cv.drawString(g_alOn ? "Alarm ON" : "Alarm OFF", 155, 265, 4);
+  cv.drawString(g_alOn ? (es() ? "Alarma SI" : "Alarm ON") : (es() ? "Alarma NO" : "Alarm OFF"), 155, 265, 4);
   cv.fillRoundRect(260, 244, 130, 42, 10, RGB(120, 80, 36));
-  cv.drawString("Done", 325, 265, 4);
+  cv.drawString(es() ? "Listo" : "Done", 325, 265, 4);
   cv.setTextColor(RGB(190, 170, 140));
-  cv.drawString("days and loudness: web page", 240, 224, 2);
+  cv.drawString(es() ? "dias y volumen: pagina web" : "days and loudness: web page", 240, 224, 2);
 }
 
 // Touch while the panel is open. Arrows repeat while held; the buttons act once.
@@ -1066,77 +1076,106 @@ static void renderBackground(Canvas &c) {
 }
 
 // ---------------------------------------------------------------- WiFi, web page, OTA
-static const char PAGE[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+static const char PAGE[] PROGMEM = R"HTML(<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Deer Hunt</title><style>body{font:16px system-ui;background:#1a1612;color:#eadfcb;max-width:560px;margin:0 auto;padding:16px}
 h1{margin:0 0 4px}small{color:#a89b82}.c{background:#2a231b;border-radius:10px;padding:14px;margin:12px 0}
 label{display:block;margin:8px 0}select,input[type=number]{background:#1a1612;color:#eadfcb;border:1px solid #5a4a36;border-radius:6px;padding:4px}
 button,a.b{background:#b8742e;color:#fff;border:0;border-radius:8px;padding:9px 14px;font:inherit;text-decoration:none;display:inline-block;margin:4px 4px 0 0;cursor:pointer}
-</style></head><body><h1>Deer Hunt</h1><small id="v"></small>
-<div class="c"><b>Status</b><div id="s">...</div></div>
-<div class="c"><b>Sound</b><br><label><input type="checkbox" id="snd"> Woods sounds on</label>
-<label>Volume <input type="range" min="0" max="100" id="vl" style="vertical-align:middle;width:55%"> <span id="vv"></span></label></div>
-<div class="c"><b>Date &amp; time</b> <small id="now"></small>
-<label>Time zone <select id="tz">
-<option value="EST5EDT,M3.2.0,M11.1.0">US Eastern</option><option value="CST6CDT,M3.2.0,M11.1.0">US Central</option>
-<option value="MST7MDT,M3.2.0,M11.1.0">US Mountain</option><option value="MST7">US Arizona</option>
-<option value="PST8PDT,M3.2.0,M11.1.0">US Pacific</option><option value="AKST9AKDT,M3.2.0,M11.1.0">US Alaska</option>
-<option value="HST10">US Hawaii</option><option value="GMT0BST,M3.5.0/1,M10.5.0">UK / Ireland</option>
-<option value="CET-1CEST,M3.5.0,M10.5.0">Central Europe</option><option value="EET-2EEST,M3.5.0/3,M10.5.0/4">Eastern Europe</option>
-<option value="IST-5:30">India</option><option value="CST-8">China</option><option value="JST-9">Japan</option>
-<option value="AEST-10AEDT,M10.1.0,M4.1.0/3">Australia East</option><option value="UTC0">UTC</option></select></label>
-<label>Date format <select id="dfmt"><option value="0">Tue 10/20/26 (month/day)</option><option value="1">Tue 20/10/26 (day/month)</option>
-<option value="2">Tue 2026-10-20</option><option value="3">Tue, Oct 20</option><option value="4">Hide the date</option></select></label>
-<label><input type="checkbox" id="h24"> 24-hour time</label>
-<button id="settime">Set time from this device</button> <small id="tmsg"></small></div>
-<div class="c"><b>Alarm clock</b> <small id="alstat"></small>
-<label><input type="checkbox" id="alon"> Alarm on</label>
-<label>Wake at <span><select id="al_h"></select> : <select id="al_m"></select></span></label>
+.hd{display:flex;justify-content:space-between;align-items:flex-start;gap:8px}.lg button{padding:3px 10px;font-size:12px;margin:0 0 0 4px;background:#5a4a36}.lg button.on{background:#b8742e}
+</style></head><body><div class="hd"><div><h1>Deer Hunt</h1><small id="v"></small></div><div class="lg"><button id="lEN" type="button">EN</button><button id="lES" type="button">ES</button></div></div>
+<div class="c"><b data-i="status">Status</b><div id="s">...</div></div>
+<div class="c"><b data-i="sound">Sound</b><br><label><input type="checkbox" id="snd"> <span data-i="sndon">Woods sounds on</span></label>
+<label><span data-i="vol">Volume</span> <input type="range" min="0" max="100" id="vl" style="vertical-align:middle;width:55%"> <span id="vv"></span></label></div>
+<div class="c"><b data-i="dt">Date &amp; time</b> <small id="now"></small>
+<label><span data-i="tz">Time zone</span> <select id="tz">
+<option value="EST5EDT,M3.2.0,M11.1.0" data-i="tz_e">US Eastern</option><option value="CST6CDT,M3.2.0,M11.1.0" data-i="tz_c">US Central</option>
+<option value="MST7MDT,M3.2.0,M11.1.0" data-i="tz_m">US Mountain</option><option value="MST7" data-i="tz_az">US Arizona</option>
+<option value="PST8PDT,M3.2.0,M11.1.0" data-i="tz_p">US Pacific</option><option value="AKST9AKDT,M3.2.0,M11.1.0" data-i="tz_ak">US Alaska</option>
+<option value="HST10" data-i="tz_h">US Hawaii</option><option value="GMT0BST,M3.5.0/1,M10.5.0" data-i="tz_uk">UK / Ireland</option>
+<option value="CET-1CEST,M3.5.0,M10.5.0" data-i="tz_ce">Central Europe</option><option value="EET-2EEST,M3.5.0/3,M10.5.0/4" data-i="tz_ee">Eastern Europe</option>
+<option value="IST-5:30" data-i="tz_in">India</option><option value="CST-8" data-i="tz_cn">China</option><option value="JST-9" data-i="tz_jp">Japan</option>
+<option value="AEST-10AEDT,M10.1.0,M4.1.0/3" data-i="tz_au">Australia East</option><option value="UTC0">UTC</option></select></label>
+<label><span data-i="df">Date format</span> <select id="dfmt"><option value="0" data-i="df0"></option><option value="1" data-i="df1"></option>
+<option value="2" data-i="df2"></option><option value="3" data-i="df3"></option><option value="4" data-i="df4"></option></select></label>
+<label><input type="checkbox" id="h24"> <span data-i="h24">24-hour time</span></label>
+<button id="settime" data-i="settime">Set time from this device</button> <small id="tmsg"></small></div>
+<div class="c"><b data-i="al">Alarm clock</b> <small id="alstat"></small>
+<label><input type="checkbox" id="alon"> <span data-i="alon">Alarm on</span></label>
+<label><span data-i="wake">Wake at</span> <span><select id="al_h"></select> : <select id="al_m"></select></span></label>
 <div id="aldays" style="margin:6px 0"></div>
-<label>Snooze (minutes) <input type="number" id="alsnz" min="1" max="30" style="width:80px"></label>
-<label>Alarm loudness <input type="range" id="alvol" min="1" max="100" style="vertical-align:middle;width:50%"> <span id="alvv"></span></label>
-<button id="apply">Apply</button> <button id="altest">Test alarm</button> <button id="alstop">Stop alarm</button> <small id="amsg"></small>
-<div><small>A minute before, the woods silently brighten like a sunrise and every animal stops to look; at the set time the chime starts over a big clock. You can also tap the time on the screen to set it. The alarm sounds even if the woods are muted.</small></div></div>
-<div class="c"><b>Hunter</b><br><label><input type="checkbox" id="hunt"> The hunter visits now and then</label>
-<button onclick="fetch('/api/hunter')">Send the hunter</button>
-<div><small>He hides behind a rock in a bottom corner, pops up and shoots. A miss sends every animal running; sometimes he gets the big buck or the tom and drags it off, and it wanders back later. Tap a rock on the screen to call him too.</small></div></div>
-<div class="c"><b>Screen</b><br><button onclick="fetch('/api/rot')">Flip screen 180&deg;</button>
-<button onclick="fetch('/api/corn')">Drop corn</button>
-<label><input type="checkbox" id="swaprb"> Swap red/blue (RGB / BGR)</label>
-<label><input type="checkbox" id="inv"> Invert colours (negative)</label>
-<small>If the colours look wrong, such as blue skin tones or a negative image, try these. A white screen usually means the other CYD build.</small></div>
-<div class="c"><b>Maintenance</b><br><a class="b" href="/update">Firmware update</a>
-<button onclick="if(confirm('Forget WiFi and restart?'))fetch('/api/wifi/forget')">Forget WiFi</button>
-<button onclick="if(confirm('Restart?'))fetch('/api/reboot')">Restart</button></div>
+<label><span data-i="snz">Snooze (minutes)</span> <input type="number" id="alsnz" min="1" max="30" style="width:80px"></label>
+<label><span data-i="alvol">Alarm loudness</span> <input type="range" id="alvol" min="1" max="100" style="vertical-align:middle;width:50%"> <span id="alvv"></span></label>
+<button id="apply" data-i="apply">Apply</button> <button id="altest" data-i="altest">Test alarm</button> <button id="alstop" data-i="alstop">Stop alarm</button> <small id="amsg"></small>
+<div><small data-i="alnote">A minute before, the woods silently brighten like a sunrise and every animal stops to look; at the set time the chime starts over a big clock. You can also tap the time on the screen to set it. The alarm sounds even if the woods are muted.</small></div></div>
+<div class="c"><b data-i="hunter">Hunter</b><br><label><input type="checkbox" id="hunt"> <span data-i="hunton">The hunter visits now and then</span></label>
+<button onclick="fetch('/api/hunter')" data-i="sendh">Send the hunter</button>
+<div><small data-i="huntnote">He hides behind a rock in a bottom corner, pops up and shoots. A miss sends every animal running; sometimes he gets the big buck or the tom and drags it off, and it wanders back later. Tap a rock on the screen to call him too.</small></div></div>
+<div class="c"><b data-i="screen">Screen</b><br><button onclick="fetch('/api/rot')" data-i="flip">Flip screen 180&deg;</button>
+<button onclick="fetch('/api/corn')" data-i="corn">Drop corn</button>
+<label><input type="checkbox" id="swaprb"> <span data-i="swap">Swap red/blue (RGB / BGR)</span></label>
+<label><input type="checkbox" id="inv"> <span data-i="inv">Invert colours (negative)</span></label>
+<small data-i="colnote">If the colours look wrong, such as blue skin tones or a negative image, try these. A white screen usually means the other CYD build.</small></div>
+<div class="c"><b data-i="maint">Maintenance</b><br><a class="b" href="/update" data-i="fw">Firmware update</a>
+<button data-i="forget" onclick="if(confirm(t('cforget')))fetch('/api/wifi/forget')">Forget WiFi</button>
+<button data-i="restart" onclick="if(confirm(t('crestart')))fetch('/api/reboot')">Restart</button></div>
 <script>
-const $=i=>document.getElementById(i);let dirty=0,busy=0;
+const $=i=>document.getElementById(i);let dirty=0,busy=0,S={};
+const L={en:{status:'Status',sound:'Sound',sndon:'Woods sounds on',vol:'Volume',dt:'Date & time',tz:'Time zone',tz_e:'US Eastern',tz_c:'US Central',tz_m:'US Mountain',tz_az:'US Arizona',tz_p:'US Pacific',tz_ak:'US Alaska',tz_h:'US Hawaii',tz_uk:'UK / Ireland',tz_ce:'Central Europe',tz_ee:'Eastern Europe',tz_in:'India',tz_cn:'China',tz_jp:'Japan',tz_au:'Australia East',
+df:'Date format',df0:'Tue 10/20/26 (month/day)',df1:'Tue 20/10/26 (day/month)',df2:'Tue 2026-10-20',df3:'Tue, Oct 20',df4:'Hide the date',h24:'24-hour time',settime:'Set time from this device',
+al:'Alarm clock',alon:'Alarm on',wake:'Wake at',snz:'Snooze (minutes)',alvol:'Alarm loudness',apply:'Apply',altest:'Test alarm',alstop:'Stop alarm',
+alnote:'A minute before, the woods silently brighten like a sunrise and every animal stops to look; at the set time the chime starts over a big clock. You can also tap the time on the screen to set it. The alarm sounds even if the woods are muted.',
+hunter:'Hunter',hunton:'The hunter visits now and then',sendh:'Send the hunter',huntnote:'He hides behind a rock in a bottom corner, pops up and shoots. A miss sends every animal running; sometimes he gets the big buck or the tom and drags it off, and it wanders back later. Tap a rock on the screen to call him too.',
+screen:'Screen',flip:'Flip screen 180°',corn:'Drop corn',swap:'Swap red/blue (RGB / BGR)',inv:'Invert colours (negative)',colnote:'If the colours look wrong, such as blue skin tones or a negative image, try these. A white screen usually means the other CYD build.',
+maint:'Maintenance',fw:'Firmware update',forget:'Forget WiFi',restart:'Restart',cforget:'Forget WiFi and restart?',crestart:'Restart?',
+up:'up',min:'min',inet:'  (internet time)',a1:'sunrise starting…',a2:'RINGING',a3:'snoozed',amiss:'last alarm was not stopped',applied:'Applied ✓',tset:'time set ✓',
+days:['Sun','Mon','Tue','Wed','Thu','Fri','Sat']},
+es:{status:'Estado',sound:'Sonido',sndon:'Sonidos del bosque',vol:'Volumen',dt:'Fecha y hora',tz:'Zona horaria',tz_e:'EE. UU. Este',tz_c:'EE. UU. Centro',tz_m:'EE. UU. Montaña',tz_az:'EE. UU. Arizona',tz_p:'EE. UU. Pacífico',tz_ak:'EE. UU. Alaska',tz_h:'EE. UU. Hawái',tz_uk:'Reino Unido / Irlanda',tz_ce:'Europa central',tz_ee:'Europa oriental',tz_in:'India',tz_cn:'China',tz_jp:'Japón',tz_au:'Australia este',
+df:'Formato de fecha',df0:'Mar 10/20/26 (mes/día)',df1:'Mar 20/10/26 (día/mes)',df2:'Mar 2026-10-20',df3:'Mar, 20 Oct',df4:'Ocultar la fecha',h24:'Hora de 24 horas',settime:'Poner la hora desde este dispositivo',
+al:'Despertador',alon:'Alarma activada',wake:'Despertar a las',snz:'Posponer (minutos)',alvol:'Volumen de la alarma',apply:'Aplicar',altest:'Probar alarma',alstop:'Detener alarma',
+alnote:'Un minuto antes, el bosque se ilumina en silencio como un amanecer y todos los animales se detienen a mirar; a la hora indicada suena el timbre sobre un reloj grande. También puedes tocar la hora en la pantalla para ajustarla. La alarma suena aunque el bosque esté silenciado.',
+hunter:'Cazador',hunton:'El cazador visita de vez en cuando',sendh:'Enviar al cazador',huntnote:'Se esconde tras una roca en una esquina inferior, aparece y dispara. Si falla, todos los animales salen corriendo; a veces atrapa al gran ciervo o al pavo y se lo lleva arrastrando, y vuelve a pasearse más tarde. Toca una roca en la pantalla para llamarlo también.',
+screen:'Pantalla',flip:'Girar pantalla 180°',corn:'Echar maíz',swap:'Intercambiar rojo/azul (RGB / BGR)',inv:'Invertir colores (negativo)',colnote:'Si los colores se ven mal, por ejemplo tonos de piel azules o una imagen en negativo, prueba estas opciones. Una pantalla blanca suele significar que es la otra versión de CYD.',
+maint:'Mantenimiento',fw:'Actualizar firmware',forget:'Olvidar WiFi',restart:'Reiniciar',cforget:'¿Olvidar el WiFi y reiniciar?',crestart:'¿Reiniciar?',
+up:'activo',min:'min',inet:'  (hora de internet)',a1:'amanecer en curso…',a2:'SONANDO',a3:'pospuesta',amiss:'la última alarma no se detuvo',applied:'Aplicado ✓',tset:'hora ajustada ✓',
+days:['Dom','Lun','Mar','Mié','Jue','Vie','Sáb']}};
+let lang=(navigator.language||'').toLowerCase().startsWith('es')?'es':'en',langSet=0;
+const t=k=>(L[lang]&&L[lang][k]!==undefined)?L[lang][k]:L.en[k];
 const mark=()=>{dirty=1;$('amsg').textContent=''};
-(function(){let h='',m='',d='';for(let i=0;i<24;i++)h+='<option>'+String(i).padStart(2,'0')+'</option>';
+(function(){let h='',m='';for(let i=0;i<24;i++)h+='<option>'+String(i).padStart(2,'0')+'</option>';
 for(let i=0;i<60;i++)m+='<option>'+String(i).padStart(2,'0')+'</option>';
-['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].forEach((n,i)=>d+='<label style="display:inline-block;margin:2px 10px 2px 0"><input type="checkbox" id="ad'+i+'"> '+n+'</label>');
-$('al_h').innerHTML=h;$('al_m').innerHTML=m;$('aldays').innerHTML=d})();
+$('al_h').innerHTML=h;$('al_m').innerHTML=m})();
+function fillDays(){let d='';t('days').forEach((n,i)=>{const c=$('ad'+i);d+='<label style="display:inline-block;margin:2px 10px 2px 0"><input type="checkbox" id="ad'+i+'"'+(c&&c.checked?' checked':'')+'> '+n+'</label>'});
+$('aldays').innerHTML=d;for(let i=0;i<7;i++){$('ad'+i).onchange=mark}}
+function applyLang(){document.documentElement.lang=lang;
+document.querySelectorAll('[data-i]').forEach(e=>e.textContent=t(e.dataset.i));
+$('lEN').classList.toggle('on',lang==='en');$('lES').classList.toggle('on',lang==='es');fillDays();show()}
+async function setLang(l){lang=l;langSet=1;applyLang();try{await fetch('/api/set?lang='+l,{method:'POST'})}catch(e){}}
+$('lEN').onclick=()=>setLang('en');$('lES').onclick=()=>setLang('es');
 const getT=()=>$('al_h').value+':'+$('al_m').value;
-async function load(){const s=await(await fetch('/api/status')).json();
+function show(){const s=S;if(s.version===undefined)return;
 $('v').textContent='v'+s.version+' - '+s.board;
-$('s').innerHTML=s.ssid+' ('+s.rssi+' dBm)<br>'+s.ip+' / '+s.host+'.local<br>up '+Math.round(s.uptime/60)+' min, '+s.fps.toFixed(1)+' fps';
-$('now').textContent=s.now+(s.ntp?'  (internet time)':'');
+$('s').innerHTML=s.ssid+' ('+s.rssi+' dBm)<br>'+s.ip+' / '+s.host+'.local<br>'+t('up')+' '+Math.round(s.uptime/60)+' '+t('min')+', '+s.fps.toFixed(1)+' fps';
+$('now').textContent=s.now+(s.ntp?t('inet'):'');
+$('alstat').textContent=['',t('a1'),t('a2'),t('a3')][s.alstate]||(s.almiss?t('amiss'):'')}
+async function load(){const s=await(await fetch('/api/status')).json();S=s;
+if(!langSet&&s.lang&&s.lang!==lang){lang=s.lang;applyLang()}else show();langSet=1;
 if(!s.ntp&&!window.timeSent){window.timeSent=1;fetch('/api/settime?epoch='+Math.floor(Date.now()/1000),{method:'POST'})}
-$('alstat').textContent=['','sunrise starting…','RINGING','snoozed'][s.alstate]||(s.almiss?'last alarm was not stopped':'');
 $('inv').checked=s.inv;$('swaprb').checked=s.swaprb;$('hunt').checked=s.hunt;
 if(document.activeElement!==$('vl')){$('snd').checked=s.snd;$('vl').value=s.vol;$('vv').textContent=s.vol}
-if(!busy&&!dirty){$('alon').checked=s.alon;const t=s.atime.split(':');$('al_h').value=t[0];$('al_m').value=t[1];
+if(!busy&&!dirty){$('alon').checked=s.alon;const tt=s.atime.split(':');$('al_h').value=tt[0];$('al_m').value=tt[1];
 for(let i=0;i<7;i++)$('ad'+i).checked=!!((s.adays>>i)&1);$('alsnz').value=s.asnz;$('alvol').value=s.avol;$('alvv').textContent=s.avol;
 $('tz').value=s.tz;$('dfmt').value=s.dfmt;$('h24').checked=s.h24}}
-async function send(){busy=1;await fetch('/api/set?tz='+encodeURIComponent($('tz').value)+'&dfmt='+$('dfmt').value+'&h24='+($('h24').checked?1:0)+'&alon='+($('alon').checked?1:0)+'&atime='+getT()+'&adays='+[0,1,2,3,4,5,6].reduce((a,i)=>a+($('ad'+i).checked?1<<i:0),0)+'&asnz='+$('alsnz').value+'&avol='+$('alvol').value,{method:'POST'});busy=0;dirty=0;$('amsg').textContent='Applied ✓';load()}
-['tz','dfmt','h24','alon','al_h','al_m','ad0','ad1','ad2','ad3','ad4','ad5','ad6','alsnz'].forEach(i=>{$(i).onchange=mark;$(i).oninput=mark});
+async function send(){busy=1;await fetch('/api/set?tz='+encodeURIComponent($('tz').value)+'&dfmt='+$('dfmt').value+'&h24='+($('h24').checked?1:0)+'&alon='+($('alon').checked?1:0)+'&atime='+getT()+'&adays='+[0,1,2,3,4,5,6].reduce((a,i)=>a+($('ad'+i).checked?1<<i:0),0)+'&asnz='+$('alsnz').value+'&avol='+$('alvol').value,{method:'POST'});busy=0;dirty=0;$('amsg').textContent=t('applied');load()}
+['tz','dfmt','h24','alon','al_h','al_m','alsnz'].forEach(i=>{$(i).onchange=mark;$(i).oninput=mark});
 $('alvol').oninput=()=>{$('alvv').textContent=$('alvol').value;mark()};
 $('apply').onclick=send;$('altest').onclick=()=>fetch('/api/alarm?cmd=test',{method:'POST'});$('alstop').onclick=()=>fetch('/api/alarm?cmd=stop',{method:'POST'});
-$('settime').onclick=async()=>{await fetch('/api/settime?epoch='+Math.floor(Date.now()/1000),{method:'POST'});$('tmsg').textContent='time set ✓';load()};
+$('settime').onclick=async()=>{await fetch('/api/settime?epoch='+Math.floor(Date.now()/1000),{method:'POST'});$('tmsg').textContent=t('tset');load()};
 const snd=()=>fetch('/api/snd?on='+($('snd').checked?1:0)+'&vol='+$('vl').value);
 $('snd').onchange=snd;$('vl').oninput=()=>{$('vv').textContent=$('vl').value;snd()};
 const col=()=>fetch('/api/set?inv='+($('inv').checked?1:0)+'&swaprb='+($('swaprb').checked?1:0),{method:'POST'});
 $('inv').onchange=col;$('swaprb').onchange=col;
 $('hunt').onchange=()=>fetch('/api/set?hunt='+($('hunt').checked?1:0),{method:'POST'});
-load();setInterval(load,3000);
+applyLang();load();setInterval(load,3000);
 </script></body></html>)HTML";
 
 static String statusJson() {
@@ -1144,14 +1183,14 @@ static String statusJson() {
   ssid.replace("\\", ""); ssid.replace("\"", "");
   char tbuf[16], dbuf[24];
   clockStrings(tbuf, sizeof(tbuf), dbuf, sizeof(dbuf));
-  char b[880];
+  char b[960];
   snprintf(b, sizeof(b),
            "{\"version\":\"%s\",\"board\":\"%s\",\"ssid\":\"%s\",\"rssi\":%d,\"ip\":\"%s\",\"host\":\"%s\",\"uptime\":%lu,\"fps\":%.1f,\"rot\":%d,"
            "\"snd\":%s,\"vol\":%d,\"now\":\"%s  %s\",\"timeset\":%s,\"ntp\":%s,\"tz\":\"%s\",\"dfmt\":%d,\"h24\":%s,\"inv\":%s,\"swaprb\":%s,\"hunt\":%s,\"hst\":%d,"
-           "\"alon\":%s,\"atime\":\"%02d:%02d\",\"adays\":%d,\"asnz\":%d,\"avol\":%d,\"alstate\":%d,\"almiss\":%s}",
+           "\"alon\":%s,\"atime\":\"%02d:%02d\",\"adays\":%d,\"asnz\":%d,\"avol\":%d,\"alstate\":%d,\"almiss\":%s,\"lang\":\"%s\"}",
            FW_VERSION, BOARD_NAME, ssid.c_str(), WiFi.RSSI(), WiFi.localIP().toString().c_str(), g_host.c_str(), millis() / 1000UL, g_fps, g_rot,
            g_snd ? "true" : "false", (int)g_vol, tbuf, dbuf, timeIsSet() ? "true" : "false", ntpSynced() ? "true" : "false", g_tz.c_str(), g_datefmt, g_h24 ? "true" : "false", g_invert ? "true" : "false", g_swaprb ? "true" : "false", g_hunt ? "true" : "false", (int)hunter.st,
-           g_alOn ? "true" : "false", g_alMin / 60, g_alMin % 60, g_alDays, g_alSnz, g_alVol, (int)alState, alMissed ? "true" : "false");
+           g_alOn ? "true" : "false", g_alMin / 60, g_alMin % 60, g_alDays, g_alSnz, g_alVol, (int)alState, alMissed ? "true" : "false", es() ? "es" : "en");
   return String(b);
 }
 
@@ -1191,6 +1230,7 @@ static void setupWeb() {
   server.on("/api/status", HTTP_GET, []() { server.sendHeader("Access-Control-Allow-Origin", "*"); server.send(200, "application/json", statusJson()); });
   server.on("/api/set", HTTP_ANY, []() {
     int v;
+    if (server.hasArg("lang")) wifiSetLangEs(server.arg("lang") == "es");   // kept by the WiFi library, not our prefs
     if (numArg("h24", 0, 1, v)) g_h24 = v != 0;
     if (numArg("hunt", 0, 1, v)) g_hunt = v != 0;
     if (numArg("dfmt", 0, 4, v)) g_datefmt = v;
@@ -1251,7 +1291,7 @@ static void setupWeb() {
   // Firmware update page at /update (ElegantOTA, the same one the fish tank and CYD-PhotoFrame use). The upload is handled
   // inside server.handleClient(), so the woods pause while it runs; progress is drawn on the screen as well.
   ElegantOTA.begin(&server);
-  ElegantOTA.onStart([]() { tft.fillScreen(TFT_BLACK); tft.setTextColor(TFT_WHITE); tft.drawString("Firmware update...", 10, 10, 4); });
+  ElegantOTA.onStart([]() { tft.fillScreen(TFT_BLACK); tft.setTextColor(TFT_WHITE); tft.drawString(es() ? "Actualizando firmware..." : "Firmware update...", 10, 10, 4); });
   ElegantOTA.onProgress([](size_t cur, size_t total) {
     static uint32_t lastDraw = 0;
     if (!total || (millis() - lastDraw < 150 && cur < total)) return;   // each repaint costs SPI time, so throttle
@@ -1267,7 +1307,7 @@ static void startServices() {
   WiFi.setAutoReconnect(true);
   configTzTime(g_tz.c_str(), "pool.ntp.org", "time.nist.gov");
   ArduinoOTA.setHostname(g_host.c_str());
-  ArduinoOTA.onStart([]() { tft.fillScreen(TFT_BLACK); tft.setTextColor(TFT_WHITE); tft.drawString("OTA update...", 10, 10, 4); });
+  ArduinoOTA.onStart([]() { tft.fillScreen(TFT_BLACK); tft.setTextColor(TFT_WHITE); tft.drawString(es() ? "Actualizando por OTA..." : "OTA update...", 10, 10, 4); });
   ArduinoOTA.onProgress([](unsigned int p, unsigned int total) {
     tft.fillRect(10, 60, PANEL_W - 20, 20, TFT_DARKGREY);
     tft.fillRect(10, 60, (int)((PANEL_W - 20) * (float)p / total), 20, TFT_GREEN);
@@ -1307,11 +1347,11 @@ static void drawInfo(uint32_t now) {
   snprintf(b, sizeof(b), "http://%s", WiFi.localIP().toString().c_str());
   cv.drawString(b, 46, 132, FONT_BIG);
   cv.setTextColor(RGB(234, 223, 203));
-  snprintf(b, sizeof(b), "WiFi: %s  (%d dBm)", WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : "not connected", WiFi.RSSI());
+  snprintf(b, sizeof(b), "WiFi: %s  (%d dBm)", WiFi.status() == WL_CONNECTED ? WiFi.SSID().c_str() : (es() ? "sin conexion" : "not connected"), WiFi.RSSI());
   cv.drawString(b, 46, 172, FONT_SMALL);
-  snprintf(b, sizeof(b), "Up %lu min  %.1f fps  %s", millis() / 60000UL, g_fps, BOARD_NAME);
+  snprintf(b, sizeof(b), es() ? "Activo %lu min  %.1f fps  %s" : "Up %lu min  %.1f fps  %s", millis() / 60000UL, g_fps, BOARD_NAME);
   cv.drawString(b, 46, 194, FONT_SMALL);
-  snprintf(b, sizeof(b), "Press BOOT to close (%lu s)", (unsigned long)((infoUntil - now) / 1000));
+  snprintf(b, sizeof(b), es() ? "Pulsa BOOT para cerrar (%lu s)" : "Press BOOT to close (%lu s)", (unsigned long)((infoUntil - now) / 1000));
   cv.drawString(b, 46, 216, FONT_SMALL);
 }
 

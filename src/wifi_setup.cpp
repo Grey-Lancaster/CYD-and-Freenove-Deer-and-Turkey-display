@@ -64,7 +64,7 @@ void wifiSetupBegin(const char *hostname, std::function<void(const String &ip)> 
 
   // hint on the top layer: the tank can run without WiFi
   lv_obj_t *hint = lv_label_create(lv_layer_top());
-  lv_label_set_text(hint, "BOOT button = skip WiFi");
+  lv_label_set_text(hint, TouchWifiProvisioner::language() == TouchWifiProvisioner::Language::Spanish ? "Boton BOOT = omitir WiFi" : "BOOT button = skip WiFi");
   lv_obj_set_style_text_color(hint, lv_color_hex(0x8899aa), 0);
   lv_obj_align(hint, LV_ALIGN_BOTTOM_RIGHT, -4, -2);
 }
@@ -76,4 +76,10 @@ void wifiSetupLoop() {
 
 void wifiForgetAll() {
   for (const String &s : TouchWifiProvisioner::savedNetworks()) TouchWifiProvisioner::forget(s);
+}
+
+bool wifiLangEs() { return TouchWifiProvisioner::language() == TouchWifiProvisioner::Language::Spanish; }
+
+void wifiSetLangEs(bool spanish) {
+  TouchWifiProvisioner::setLanguage(spanish ? TouchWifiProvisioner::Language::Spanish : TouchWifiProvisioner::Language::English);
 }
