@@ -3,7 +3,7 @@ Renders 480x320 frames with RGB565 colours like the panel, no anti-aliasing.
   python design/preview.py            -> design/woods_*.png, design/woods.mp4 (needs ffmpeg)
 """
 import math, os, random, subprocess, sys
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 VW, VH = 480, 320
 HORIZON, GROUND_MIN, GROUND_MAX = 180, 224, 306
@@ -59,6 +59,13 @@ class Canvas:
     def drawPixel(self, x, y, c):
         self.d.point((round(x), round(y)), fill=c)
 
+    def drawString(self, text, x, y, c, size=22):
+        try:
+            f = ImageFont.truetype("arial.ttf", size)
+        except OSError:
+            f = ImageFont.load_default()
+        self.d.text((round(x), round(y)), text, fill=c, font=f, anchor="mm")
+
     def hline(self, y, c):
         self.d.line([0, y, VW - 1, y], fill=c)
 
@@ -72,7 +79,7 @@ def scale_at(y):
 
 # ------------------------------------------------------------ animals
 BUCK, DOE, FAWN, TOM, HEN = range(5)
-WALK, GRAZE, LOOK, EAT = range(4)
+WALK, GRAZE, LOOK, EAT, FLEE, HIDDEN, DOWN = range(7)
 
 
 class Critter:
@@ -130,6 +137,36 @@ def pick_next(c):
 
 def update_critter(i, dt):
     c = crit[i]
+    if c.m == DOWN:                       # lying where it fell; the hunter moves it
+        return
+    if c.m == HIDDEN:                     # out of sight until the timer runs out, then back in from the edge it left by
+        c.timer -= dt
+        if c.timer <= 0:
+            c.x = VW + 50 if c.dir > 0 else -50
+            c.dir = -c.dir
+            c.y = random.randint(GROUND_MIN, GROUND_MAX - 1)
+            c.ty, c.m, c.timer, c.head, c.fan = c.y, WALK, 6, 0.0, 0.0
+        return
+    if c.m == FLEE:                       # bolting away from the hunter
+        if c.timer > 0:
+            c.timer -= dt
+            c.head += (0.0 - c.head) * min(1.0, dt * 6)
+            return
+        fv = c.spd * 6.0 * scale_at(c.y)
+        c.x += c.dir * fv * dt
+        c.ph += fv * dt * 0.16
+        c.head = 0
+        if c.x < -70 or c.x > VW + 70:
+            c.m, c.timer = HIDDEN, 8 + random.randrange(8)
+        return
+    if hunter_alert():                    # the hunter takes aim: everyone stops and looks up, the tom fans his tail
+        if c.corn >= 0:
+            corn[c.corn]["by"] = -1
+            c.corn = -1
+        c.m, c.timer = LOOK, 2.0
+        c.head += (0.0 - c.head) * min(1.0, dt * 4)
+        c.fan += ((1.0 if c.k == TOM else 0.0) - c.fan) * min(1.0, dt * 2.5)
+        return
     sc = scale_at(c.y)
     c.timer -= dt
     if c.corn >= 0 and not corn[c.corn]["on"]:
@@ -169,7 +206,9 @@ def update_critter(i, dt):
         d = crit[FAWN_MOTHER]
         tx = d.x - d.dir * 34
         dx = tx - c.x
-        if abs(dx) > 12:
+        if d.m == HIDDEN:
+            c.m = GRAZE
+        elif abs(dx) > 12:
             c.m, c.dir = WALK, 1 if dx >= 0 else -1
             v = c.spd * 1.2 * sc
             c.x += c.dir * v * dt
@@ -197,6 +236,7 @@ def update_critter(i, dt):
 
 
 def update_world(dt, t):
+    update_hunter(dt)
     for i in range(len(crit)):
         update_critter(i, dt)
     for c in corn:
@@ -209,6 +249,95 @@ def update_world(dt, t):
         l["x"] += (l["vx"] + 9 * math.sin(t * 1.3 + l["ph"])) * dt
         if l["y"] > VH + 6 or l["x"] < -8 or l["x"] > VW + 8:
             l["y"], l["x"] = -6, random.randrange(VW)
+
+
+# ------------------------------------------------------------ the hunter (behaviour; mirrors src/main.cpp)
+H_OFF, H_RISE, H_AIM, H_SHOT, H_LOWER, H_RUN, H_DRAG = range(7)
+
+
+class Hunter:
+    st, t, since, side, x, y, sx, sy, dir, tgt, drag_dir, hit, force = H_OFF, 0.0, 99.0, 0, 46.0, 314.0, 0.0, 0.0, 1, -1, 1, False, -2
+
+
+hunter = Hunter()
+HUNT_X, HUNT_DIR = (46, 428), (1, -1)
+
+
+def hunter_alert():
+    return hunter.st == H_AIM or (hunter.st == H_SHOT and hunter.t < 0.12)
+
+
+def start_hunter(side=-1, force=-2):
+    if hunter.st != H_OFF:
+        return
+    hunter.side = random.randrange(2) if side < 0 else side
+    hunter.x, hunter.y, hunter.dir = HUNT_X[hunter.side], 314.0, HUNT_DIR[hunter.side]
+    hunter.tgt, hunter.hit, hunter.force, hunter.t, hunter.since = -1, False, force, 0.0, 99.0
+    hunter.st = H_RISE
+
+
+def on_screen(c):
+    return c.m not in (HIDDEN, DOWN) and 12 < c.x < VW - 12
+
+
+def hunter_fires():
+    hs = 1.3 * scale_at(314)
+    hunter.sx, hunter.sy, hunter.since = hunter.x + hunter.dir * 33 * hs, hunter.y - 32.5 * hs, 0.0
+    roll = random.randrange(100)
+    want = hunter.force if hunter.force != -2 else (-1 if roll < 40 else 0 if roll < 70 else 4)
+    if want >= 0 and not on_screen(crit[want]):
+        want = 4 if (want == 0 and on_screen(crit[4])) else 0 if (want == 4 and on_screen(crit[0])) else -1
+    hunter.tgt, hunter.hit = want, want >= 0
+    for i, c in enumerate(crit):
+        if c.corn >= 0:
+            corn[c.corn]["by"] = -1
+            c.corn = -1
+        if c.m == HIDDEN:
+            continue
+        if i == want:
+            c.m, c.head = DOWN, 1.0
+            continue
+        c.m, c.dir, c.timer = FLEE, (1 if c.x >= hunter.x else -1), random.randrange(0, 45) / 100
+
+
+def update_hunter(dt):
+    h = hunter
+    if h.st == H_OFF:
+        return
+    h.t += dt
+    h.since += dt
+    if h.st == H_RISE and h.t >= 1.3:
+        h.st, h.t = H_AIM, 0.0
+    elif h.st == H_AIM and h.t >= 1.6:
+        h.st, h.t = H_SHOT, 0.0
+        hunter_fires()
+    elif h.st == H_SHOT and h.t >= 1.1:
+        h.t = 0.0
+        if h.hit:
+            h.st = H_RUN
+            h.drag_dir = -1 if crit[h.tgt].x < VW / 2 else 1
+        else:
+            h.st = H_LOWER
+    elif h.st == H_LOWER and h.t >= 1.0:
+        h.st, h.tgt = H_OFF, -1
+    elif h.st == H_RUN:
+        a = crit[h.tgt]
+        gx = a.x + h.drag_dir * (36 if a.k <= FAWN else 22) * scale_at(a.y)
+        dx, dy = gx - h.x, (a.y + 2) - h.y
+        h.dir = 1 if dx >= 0 else -1
+        if abs(dx) > 3:
+            h.x += h.dir * min(95.0 * dt, abs(dx))
+        h.y += clamp(dy, -1, 1) * 70 * dt
+        if abs(dx) <= 3 and abs(dy) < 3:
+            h.st, h.t, h.dir = H_DRAG, 0.0, h.drag_dir
+    elif h.st == H_DRAG:
+        a = crit[h.tgt]
+        h.x += h.drag_dir * 34 * dt
+        a.x = h.x - h.drag_dir * (36 if a.k <= FAWN else 22) * scale_at(a.y)
+        a.y = h.y - 2
+        if h.x < -60 or h.x > VW + 60:
+            a.m, a.timer, a.dir = HIDDEN, 20 + random.randrange(15), h.drag_dir
+            h.st, h.tgt = H_OFF, -1
 
 
 # ------------------------------------------------------------ drawing
@@ -350,6 +479,138 @@ def draw_trunk_front(x, w):
             cv.drawLine(lx, y + 7 * (i & 1), lx + 1.5, y + 36 + 7 * (i & 1), RGB(66, 50, 36))
 
 
+ROCKS = (
+    (40, 314, 34, 22, 32, 305, 16, 8, RGB(92, 90, 94), RGB(128, 126, 130)),
+    (434, 316, 32, 21, 426, 308, 14, 7, RGB(86, 84, 90), RGB(120, 118, 124)),
+)
+
+
+def draw_rock(i):
+    cx, cy, rx, ry, hx, hy, hrx, hry, col, hcol = ROCKS[i]
+    cv.fillEllipse(cx, cy, rx, ry, col)
+    cv.fillEllipse(hx, hy, hrx, hry, hcol)
+
+
+def crit_scale(c):
+    return scale_at(c.y) * (0.62 if c.k == FAWN else 1.0 if c.k == BUCK else 0.92 if c.k == DOE else 1.0 if c.k == TOM else 0.85)
+
+
+def draw_down(c):
+    p = Pose(c.x, c.y, crit_scale(c), c.dir)
+    X = RGB(25, 20, 18)
+    if c.k <= FAWN:
+        buck, fawn = c.k == BUCK, c.k == FAWN
+        body = RGB(138, 90, 50) if buck else RGB(172, 118, 70) if fawn else RGB(160, 112, 68)
+        dark = RGB(100, 64, 36) if buck else RGB(135, 90, 52) if fawn else RGB(122, 84, 50)
+        for l in ((-14, -14, -19, -31), (-7, -15, -11, -32), (8, -15, 13, -32), (15, -14, 20, -31)):
+            cv.drawWideLine(p.px(l[0]), p.py(l[1]), p.px(l[2]), p.py(l[3]), 3.0 * p.s, dark, dark)
+            cv.fillCircle(p.px(l[2]), p.py(l[3]), 1.6 * p.s, RGB(40, 30, 24))
+        cv.fillEllipse(p.px(0), p.py(-10), 26 * p.s, 9 * p.s, body)
+        cv.fillEllipse(p.px(0), p.py(-13), 20 * p.s, 4 * p.s, RGB(222, 200, 160))
+        cv.fillTriangle(p.px(-25), p.py(-14), p.px(-32), p.py(-9), p.px(-25), p.py(-6), RGB(240, 235, 225))
+        cv.drawWideLine(p.px(20), p.py(-9), p.px(29), p.py(-6), 8 * p.s, body, body)
+        cv.fillCircle(p.px(31), p.py(-6), 5.5 * p.s, body)
+        cv.fillEllipse(p.px(37), p.py(-4), 4.5 * p.s, 3.2 * p.s, RGB(196, 166, 126))
+        cv.fillTriangle(p.px(28), p.py(-9), p.px(22), p.py(-15), p.px(30), p.py(-12), dark)
+        cv.drawLine(p.px(30), p.py(-9), p.px(34), p.py(-5), X)
+        cv.drawLine(p.px(34), p.py(-9), p.px(30), p.py(-5), X)
+        if buck:
+            ant = RGB(214, 194, 150)
+            cv.drawWideLine(p.px(30), p.py(-11), p.px(28), p.py(-26), 1.7 * p.s, ant, ant)
+            cv.drawWideLine(p.px(28), p.py(-26), p.px(22), p.py(-30), 1.7 * p.s, ant, ant)
+            cv.drawWideLine(p.px(29), p.py(-19), p.px(35), p.py(-24), 1.7 * p.s, ant, ant)
+    else:
+        tom = c.k == TOM
+        body = RGB(86, 56, 36) if tom else RGB(124, 94, 64)
+        wing = RGB(62, 40, 28) if tom else RGB(98, 72, 48)
+        legc = RGB(205, 150, 110)
+        neck = RGB(120, 150, 190) if tom else RGB(168, 140, 118)
+        if tom:
+            for i in range(7):
+                a, a2 = 0.5 + 1.0 * i / 6, 0.5 + 1.0 * (i + 1) / 6
+                cv.fillTriangle(p.px(-12), p.py(-9), p.px(-12 - 24 * math.sin(a)), p.py(-9 - 24 * math.cos(a) * 0.55),
+                                p.px(-12 - 24 * math.sin(a2)), p.py(-9 - 24 * math.cos(a2) * 0.55),
+                                RGB(158, 88, 40) if i & 1 else RGB(206, 168, 108))
+        else:
+            cv.fillTriangle(p.px(-11), p.py(-9), p.px(-25), p.py(-12), p.px(-22), p.py(-4), wing)
+        cv.drawWideLine(p.px(2), p.py(-14), p.px(-2), p.py(-27), 2.2 * p.s, legc, legc)
+        cv.drawWideLine(p.px(7), p.py(-14), p.px(5), p.py(-28), 2.2 * p.s, legc, legc)
+        cv.drawLine(p.px(-2), p.py(-27), p.px(-6), p.py(-26), legc)
+        cv.drawLine(p.px(5), p.py(-28), p.px(9), p.py(-27), legc)
+        cv.fillEllipse(p.px(0), p.py(-8), 15 * p.s, 8 * p.s, body)
+        cv.fillEllipse(p.px(-2), p.py(-11), 10 * p.s, 5 * p.s, wing)
+        cv.drawWideLine(p.px(11), p.py(-8), p.px(21), p.py(-3), 4.2 * p.s, neck, neck)
+        cv.fillCircle(p.px(22), p.py(-3), 3.2 * p.s, neck)
+        cv.fillTriangle(p.px(24), p.py(-4), p.px(29), p.py(-2.5), p.px(24), p.py(-1.5), RGB(226, 196, 100))
+        if tom:
+            cv.fillEllipse(p.px(25), p.py(0), 1.6 * p.s, 2.5 * p.s, RGB(200, 40, 40))
+        cv.drawLine(p.px(21), p.py(-5), p.px(23.5), p.py(-2), X)
+        cv.drawLine(p.px(23.5), p.py(-5), p.px(21), p.py(-2), X)
+
+
+def draw_hunter(t):
+    h = hunter
+    if h.st == H_OFF:
+        return
+    rise = min(1.0, h.t / 1.3) if h.st == H_RISE else max(0.0, 1.0 - h.t / 1.0) if h.st == H_LOWER else 1.0
+    rise = rise * rise * (3 - 2 * rise)
+    s = 1.3 * scale_at(clamp(h.y, GROUND_MIN, GROUND_MAX + 8))
+    p = Pose(h.x, h.y + (1 - rise) * 50 * s, s, h.dir)
+    vest, vest_d, pants, boot = RGB(238, 110, 22), RGB(190, 80, 16), RGB(128, 116, 66), RGB(36, 28, 22)
+    skin, gun, wood = RGB(232, 188, 146), RGB(60, 62, 68), RGB(112, 72, 38)
+    aiming, moving = h.st in (H_AIM, H_SHOT), h.st in (H_RUN, H_DRAG)
+    gait = h.t * (13.0 if h.st == H_RUN else 7.0)
+    for n in range(2):
+        hip = 2.0 if n else -2.0
+        sw = math.sin(gait + n * 3.14) * 7 if moving else 0
+        fx = hip + sw
+        cv.drawWideLine(p.px(hip), p.py(-17), p.px(fx), p.py(-1), 3.8 * p.s, pants, pants)
+        cv.fillEllipse(p.px(fx + 1.5), p.py(-1), 3.2 * p.s, 1.8 * p.s, boot)
+    cv.fillEllipse(p.px(0), p.py(-26), 7.2 * p.s, 10 * p.s, vest)
+    cv.drawLine(p.px(-3), p.py(-32), p.px(-3), p.py(-19), vest_d)
+    hx = hy = 0
+    if aiming:
+        k = 2.0 if (h.st == H_SHOT and h.since < 0.15) else 0.0
+        cv.drawWideLine(p.px(-3 - k), p.py(-27), p.px(9 - k), p.py(-30), 3.4 * p.s, wood, wood)
+        cv.drawWideLine(p.px(8 - k), p.py(-30), p.px(33 - k), p.py(-32.5), 2.2 * p.s, gun, gun)
+        cv.drawWideLine(p.px(3), p.py(-29), p.px(18 - k), p.py(-31), 3.4 * p.s, vest_d, vest_d)
+        cv.fillCircle(p.px(18 - k), p.py(-31), 1.8 * p.s, skin)
+    elif h.st == H_DRAG:
+        cv.drawWideLine(p.px(-5), p.py(-38), p.px(-1), p.py(-12), 2.4 * p.s, gun, gun)
+        cv.drawWideLine(p.px(3), p.py(-27), p.px(11), p.py(-21), 3.4 * p.s, vest_d, vest_d)
+        hx, hy = p.px(11), p.py(-21)
+        cv.fillCircle(hx, hy, 1.8 * p.s, skin)
+    else:
+        cv.drawWideLine(p.px(0), p.py(-20), p.px(22), p.py(-33), 2.4 * p.s, gun, gun)
+        cv.drawWideLine(p.px(3), p.py(-27), p.px(10), p.py(-23), 3.4 * p.s, vest_d, vest_d)
+        cv.fillCircle(p.px(10), p.py(-23), 1.8 * p.s, skin)
+    cv.fillCircle(p.px(3), p.py(-37), 4.8 * p.s, skin)
+    cv.fillCircle(p.px(5.5), p.py(-37.5), 0.9 * p.s, RGB(15, 12, 10))
+    cv.fillEllipse(p.px(3), p.py(-40.5), 5.4 * p.s, 3.2 * p.s, vest)
+    cv.fillTriangle(p.px(6), p.py(-40), p.px(12), p.py(-38.5), p.px(6), p.py(-37.5), vest_d)
+    if h.st == H_DRAG:
+        a = crit[h.tgt]
+        cv.drawWideLine(hx, hy, a.x + h.drag_dir * (22 if a.k <= FAWN else 12) * scale_at(a.y), a.y - 7, 1.4, RGB(150, 120, 70), RGB(150, 120, 70))
+    near_rock = True if h.st not in (H_RUN, H_DRAG) else abs(h.x - ROCKS[h.side][0]) < ROCKS[h.side][2]
+    if near_rock:
+        draw_rock(h.side)
+    if h.since < 2.4:
+        if h.since < 0.14:
+            cv.fillCircle(h.sx, h.sy, 7, RGB(255, 226, 120))
+            cv.fillCircle(h.sx, h.sy, 4, RGB(255, 255, 235))
+            for k in range(5):
+                a = (k - 2) * 0.5
+                cv.drawWideLine(h.sx, h.sy, h.sx + h.dir * 18 * math.cos(a), h.sy + 18 * math.sin(a), 2.5, RGB(255, 226, 120), RGB(255, 226, 120))
+        for j in range(4):
+            age = h.since - 0.06 * j
+            if age <= 0 or age >= 2.4:
+                continue
+            cv.fillCircle(h.sx + h.dir * (age * 16 + j * 2), h.sy - age * 12, 3 + age * 7, mix(228, 228, 234, 150, 158, 176, age / 2.4))
+        if h.since < 0.5:
+            cv.drawString("BANG!", h.sx + h.dir * 30 + 1, h.sy - 22 + 1, RGB(60, 30, 10))
+            cv.drawString("BANG!", h.sx + h.dir * 30, h.sy - 22, RGB(255, 236, 140))
+
+
 def draw_scene(t):
     order = sorted(range(len(crit)), key=lambda i: crit[i].y)   # stable, like the insertion sort
     for pas in range(2):
@@ -359,10 +620,17 @@ def draw_scene(t):
             cv.fillEllipse(f["x"], f["y"] - f["z"], 1.7, 1.1, RGB(236, 190, 60))
             cv.drawPixel(f["x"] - 1, f["y"] - f["z"] - 1, RGB(255, 240, 170))
     for i in order:
-        draw_shadow(crit[i])
+        if crit[i].m != HIDDEN:
+            draw_shadow(crit[i])
     for i in order:
         c = crit[i]
-        (draw_deer if c.k <= FAWN else draw_turkey)(c, t)
+        if c.m == HIDDEN:
+            continue
+        if c.m == DOWN:
+            draw_down(c)
+        else:
+            (draw_deer if c.k <= FAWN else draw_turkey)(c, t)
+    draw_hunter(t)
     for l in leaves:
         s = math.sin(t * 3 + l["ph"])
         cv.fillEllipse(l["x"], l["y"], 2.6, 1.2 + 0.9 * abs(s), l["c"])
@@ -480,13 +748,51 @@ def render_background():
         cv.drawLine(x, y, x - 2, y - hgt, g)
         cv.drawLine(x, y, x, y - hgt - 2, g)
         cv.drawLine(x, y, x + 2, y - hgt, g)
-    cv.fillEllipse(36, 312, 30, 14, RGB(92, 90, 94))
-    cv.fillEllipse(30, 306, 14, 6, RGB(128, 126, 130))
-    cv.fillEllipse(436, 314, 26, 12, RGB(86, 84, 90))
-    cv.fillEllipse(430, 309, 12, 5, RGB(120, 118, 124))
+    draw_rock(0)
+    draw_rock(1)
+
+
+def hunt_sheet(outcome, side):
+    """python design/preview.py hunt miss|buck|tom [0|1]  ->  design/hunt_<outcome>.png, a contact sheet of the event."""
+    random.seed(11)
+    leaves.clear()
+    for _ in range(18):
+        leaves.append(dict(x=random.randrange(VW), y=random.randrange(VH), vy=12 + random.randrange(14),
+                           vx=random.randint(-4, 7), ph=random.randrange(628) / 100, c=random.choice(LEAF_COLS)))
+    render_background()
+    bg = cv.im.copy()
+    crit[:] = make_world()
+    force = {"miss": -1, "buck": 0, "tom": 4}[outcome]
+    offs = [0.9, 2.3, 2.95 + 0.07, 3.1 + 0.4, 3.1 + 1.3, 3.1 + 3.0, 3.1 + 5.5, 3.1 + 9.0, 3.1 + 14.0, 3.1 + 22.0, 3.1 + 32.0, 3.1 + 42.0] if force >= 0 \
+        else [0.9, 2.3, 2.95 + 0.07, 3.1 + 0.4, 3.1 + 1.0, 3.1 + 2.2, 3.1 + 4.0, 3.1 + 6.0, 3.1 + 9.0, 3.1 + 12.0, 3.1 + 18.0, 3.1 + 26.0]
+    fps, start, dt = 20, 3.0, 1 / 20
+    tiles, t = [], 0.0
+    while t < start + max(offs) + dt:
+        if abs(t - start) < dt / 2:
+            start_hunter(side, force)
+        update_world(dt, t)
+        cv.im.paste(bg)
+        draw_scene(t)
+        for off in offs:
+            if abs(t - (start + off)) < dt / 2:
+                tile = cv.im.copy()
+                ImageDraw.Draw(tile).text((6, 4), "+%.1f s" % off, fill=(255, 255, 255))
+                tiles.append(tile)
+        t += dt
+    cols = 3
+    rows = (len(tiles) + cols - 1) // cols
+    sheet = Image.new("RGB", (cols * VW, rows * VH))
+    for i, tl in enumerate(tiles):
+        sheet.paste(tl, ((i % cols) * VW, (i // cols) * VH))
+    path = os.path.join(OUT, "hunt_%s.png" % outcome)
+    sheet.save(path)
+    print(path, len(tiles), "frames")
 
 
 def main():
+    if len(sys.argv) > 2 and sys.argv[1] == "hunt":
+        hunt_sheet(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 0)
+        return
     random.seed(4)
     for _ in range(18):
         leaves.append(dict(x=random.randrange(VW), y=random.randrange(VH), vy=12 + random.randrange(14),

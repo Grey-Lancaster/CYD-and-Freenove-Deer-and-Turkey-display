@@ -22,7 +22,7 @@
 #include "wifi_setup.h"
 #include "audio.h"
 
-#define FW_VERSION "1.0.0"
+#define FW_VERSION "1.1.0"
 
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite frame = TFT_eSprite(&tft);    // Freenove: the whole frame
@@ -50,6 +50,7 @@ static float curT = 0;
 
 // Clock, date and alarm settings (persisted in NVS, editable from the web page)
 bool g_h24 = false;                // 24-hour clock
+bool g_hunt = true;               // the hunter visits now and then (web page switch)
 String g_tz = "EST5EDT,M3.2.0,M11.1.0";   // POSIX TZ string
 int g_datefmt = 0;                 // 0 Tue 10/20/26, 1 Tue 20/10/26, 2 Tue 2026-10-20, 3 Tue, Oct 20, 4 hidden
 bool g_alOn = false;
@@ -69,6 +70,7 @@ static inline uint16_t bswap16(uint16_t v) { return (v >> 8) | (v << 8); }
 static void saveSettings() {
   prefs.putBool("h24", g_h24); prefs.putString("tz", g_tz); prefs.putInt("dfmt", g_datefmt);
   prefs.putBool("invert", g_invert); prefs.putBool("swaprb", g_swaprb);
+  prefs.putBool("hunt", g_hunt);
   prefs.putBool("alon", g_alOn); prefs.putInt("almin", g_alMin); prefs.putInt("aldays", g_alDays); prefs.putInt("alsnz", g_alSnz); prefs.putInt("alvol", g_alVol);
 }
 
@@ -88,7 +90,7 @@ static float scaleAt(float y) { return 0.62f + 0.55f * (y - GROUND_MIN) / (GROUN
 
 // ---------------------------------------------------------------- animals
 enum Kind { BUCK, DOE, FAWN, TOM, HEN };
-enum Mode { WALK, GRAZE, LOOK, EAT };
+enum Mode { WALK, GRAZE, LOOK, EAT, FLEE, HIDDEN, DOWN };   // FLEE / HIDDEN / DOWN: the hunter's doing
 
 struct Critter {
   Kind k;
@@ -121,6 +123,26 @@ Corn corn[NCORN];
 
 struct Leaf { float x, y, vy, vx, ph; uint16_t c; };
 Leaf leaves[18];
+
+// ---- the hunter: now and then he pops up from behind a rock, shoots, and either misses (everyone runs off and hides) or
+// gets the big buck or the tom and drags it away. Whatever he gets walks back in a while later. Cartoon only.
+enum HunterState { H_OFF, H_RISE, H_AIM, H_SHOT, H_LOWER, H_RUN, H_DRAG };
+struct Hunter {
+  HunterState st;
+  float t;              // seconds in this state
+  float since;          // seconds since the shot (smoke, BANG)
+  int side;             // 0 = rock bottom-left, 1 = rock bottom-right
+  float x, y;           // feet
+  float sx, sy;         // where the muzzle was at the shot
+  int dir;              // facing
+  int tgt;              // critter he shot, or -1
+  int dragDir;          // which edge he drags it to
+  bool hit;
+  int force;            // -2 random, -1 miss, else the critter index that gets shot (for testing)
+  uint32_t next;        // millis() of the next automatic visit
+};
+Hunter hunter = {H_OFF, 0, 99, 0, 46, 314, 0, 0, 1, -1, 1, false, -2, 90000};
+static inline bool hunterAlert() { return hunter.st == H_AIM || (hunter.st == H_SHOT && hunter.t < 0.12f); }
 
 // A tap drops a pile of kernels, heaped toward the middle.
 static void spawnCorn(float wx, float wy) {
@@ -156,7 +178,20 @@ static void pickNext(Critter &c) {
 
 static void updateCritter(int i, float dt) {
   Critter &c = crit[i];
-  if (alActive()) {                    // sunrise / alarm: everyone stops and looks up at the light, the tom fans his tail
+  if (c.m == DOWN) return;             // lying where it fell; the hunter moves it
+  if (c.m == HIDDEN) {                 // out of sight until the timer runs out, then it walks back in from the edge it left by
+    c.timer -= dt;
+    if (c.timer <= 0) { c.x = c.dir > 0 ? VW + 50 : -50; c.dir = -c.dir; c.y = random(GROUND_MIN, GROUND_MAX); c.ty = c.y; c.m = WALK; c.timer = 6; c.head = 0; c.fan = 0; }
+    return;
+  }
+  if (c.m == FLEE) {                   // bolting away from the hunter
+    if (c.timer > 0) { c.timer -= dt; c.head += (0.0f - c.head) * min(1.0f, dt * 6); return; }   // a moment's reaction first
+    const float fv = c.spd * 6.0f * scaleAt(c.y);
+    c.x += c.dir * fv * dt; c.ph += fv * dt * 0.16f; c.head = 0;
+    if (c.x < -70 || c.x > VW + 70) { c.m = HIDDEN; c.timer = 8 + random(8); }
+    return;
+  }
+  if (alActive() || hunterAlert()) {   // sunrise / alarm / the hunter takes aim: everyone stops and looks up, the tom fans his tail
     if (c.corn >= 0) { corn[c.corn].by = -1; c.corn = -1; }
     c.m = LOOK; c.timer = 2.0f;
     c.head += (0.0f - c.head) * min(1.0f, dt * 4);
@@ -196,7 +231,8 @@ static void updateCritter(int i, float dt) {
     // trail the doe
     Critter &d = crit[FAWN_MOTHER];
     float tx = d.x - d.dir * 34, dx = tx - c.x;
-    if (fabsf(dx) > 12) { c.m = WALK; c.dir = dx >= 0 ? 1 : -1; v = c.spd * 1.2f * sc; c.x += c.dir * v * dt; }
+    if (d.m == HIDDEN) { c.m = GRAZE; }
+    else if (fabsf(dx) > 12) { c.m = WALK; c.dir = dx >= 0 ? 1 : -1; v = c.spd * 1.2f * sc; c.x += c.dir * v * dt; }
     else { c.m = (d.m == WALK) ? GRAZE : d.m; c.dir = d.dir; }
     c.y += constrain(d.y + 6 - c.y, -1.0f, 1.0f) * 12 * dt;
   } else if (c.m == WALK) {
@@ -215,7 +251,97 @@ static void updateCritter(int i, float dt) {
   c.fan += (((c.m == LOOK && c.k == TOM) ? 1.0f : 0.0f) - c.fan) * min(1.0f, dt * 2.5f);
 }
 
+// ---------------------------------------------------------------- the hunter (behaviour)
+static const int HUNT_X[2] = {46, 428};      // where he stands behind each rock
+static const int HUNT_DIR[2] = {1, -1};      // and which way he faces
+
+static void startHunter(int side, int force = -2) {
+  if (hunter.st != H_OFF) return;
+  hunter.side = side < 0 ? random(2) : side;
+  hunter.x = HUNT_X[hunter.side]; hunter.y = 314; hunter.dir = HUNT_DIR[hunter.side];
+  hunter.tgt = -1; hunter.hit = false; hunter.force = force; hunter.t = 0; hunter.since = 99;
+  hunter.st = H_RISE;
+}
+
+static void hunterDone(uint32_t now) {
+  hunter.st = H_OFF; hunter.tgt = -1;
+  hunter.next = now + (180 + random(240)) * 1000UL;      // the next visit in 3 to 7 minutes
+}
+
+static bool onScreen(const Critter &c) { return c.m != HIDDEN && c.m != DOWN && c.x > 12 && c.x < VW - 12; }
+
+// The shot: 40% a miss, 30% the big buck, 30% the tom. Everyone else runs for it.
+static void hunterFires() {
+  audioShot();
+  const float hs = 1.3f * scaleAt(314);
+  hunter.sx = hunter.x + hunter.dir * 33 * hs; hunter.sy = hunter.y - 32.5f * hs; hunter.since = 0;
+  const int roll = random(100);
+  int want = hunter.force != -2 ? hunter.force : roll < 40 ? -1 : roll < 70 ? 0 : 4;      // crit[0] is the buck, crit[4] the tom
+  if (want >= 0 && !onScreen(crit[want])) want = (want == 0 && onScreen(crit[4])) ? 4 : (want == 4 && onScreen(crit[0])) ? 0 : -1;
+  hunter.tgt = want; hunter.hit = want >= 0;
+  for (int i = 0; i < NCRIT; i++) {
+    Critter &c = crit[i];
+    if (c.corn >= 0) { corn[c.corn].by = -1; c.corn = -1; }
+    if (c.m == HIDDEN) continue;
+    if (i == want) { c.m = DOWN; c.head = 1; continue; }
+    c.m = FLEE; c.dir = c.x >= hunter.x ? 1 : -1; c.timer = random(0, 45) / 100.0f;     // a moment's reaction, then run
+  }
+}
+
+static void updateHunter(float dt) {
+  const uint32_t now = millis();
+  if (hunter.st == H_OFF) {
+    if (g_hunt && !alActive() && now >= hunter.next) startHunter(-1);
+    return;
+  }
+  if (alActive()) {                          // the alarm wins: the hunter leaves and anything he got walks back soon
+    if (hunter.tgt >= 0 && crit[hunter.tgt].m == DOWN) {
+      Critter &a = crit[hunter.tgt];
+      a.m = HIDDEN; a.timer = 3; a.dir = a.x < VW / 2 ? -1 : 1;
+    }
+    hunterDone(now);
+    return;
+  }
+  hunter.t += dt;
+  hunter.since += dt;
+  switch (hunter.st) {
+    case H_RISE:  if (hunter.t >= 1.3f) { hunter.st = H_AIM; hunter.t = 0; } break;
+    case H_AIM:   if (hunter.t >= 1.6f) { hunter.st = H_SHOT; hunter.t = 0; hunterFires(); } break;
+    case H_SHOT:
+      if (hunter.t >= 1.1f) {
+        hunter.t = 0;
+        if (hunter.hit) { hunter.st = H_RUN; hunter.dragDir = crit[hunter.tgt].x < VW / 2 ? -1 : 1; }
+        else hunter.st = H_LOWER;
+      }
+      break;
+    case H_LOWER: if (hunter.t >= 1.0f) hunterDone(now); break;
+    case H_RUN: {                            // run out to the animal and take hold of it from the side he will pull toward
+      Critter &a = crit[hunter.tgt];
+      const float gx = a.x + hunter.dragDir * (a.k <= FAWN ? 36 : 22) * scaleAt(a.y);
+      const float dx = gx - hunter.x, dy = (a.y + 2) - hunter.y;
+      hunter.dir = dx >= 0 ? 1 : -1;
+      if (fabsf(dx) > 3) hunter.x += hunter.dir * min(95.0f * dt, fabsf(dx));
+      hunter.y += constrain(dy, -1.0f, 1.0f) * 70 * dt;
+      if (fabsf(dx) <= 3 && fabsf(dy) < 3) { hunter.st = H_DRAG; hunter.t = 0; hunter.dir = hunter.dragDir; }
+      break;
+    }
+    case H_DRAG: {                           // drag it off the nearest edge
+      Critter &a = crit[hunter.tgt];
+      hunter.x += hunter.dragDir * 34 * dt;
+      a.x = hunter.x - hunter.dragDir * (a.k <= FAWN ? 36 : 22) * scaleAt(a.y);
+      a.y = hunter.y - 2;
+      if (hunter.x < -60 || hunter.x > VW + 60) {      // out of sight: it wanders back in a while
+        a.m = HIDDEN; a.timer = 20 + random(15); a.dir = hunter.dragDir;
+        hunterDone(now);
+      }
+      break;
+    }
+    default: break;
+  }
+}
+
 static void updateWorld(float dt, float t) {
+  updateHunter(dt);
   for (int i = 0; i < NCRIT; i++) updateCritter(i, dt);
   for (auto &c : corn) {
     if (!c.on) continue;
@@ -377,6 +503,146 @@ static void drawTrunkFront(float x, float w) {
   for (int i = 0; i < 6; i++) {
     float lx = x + w * (0.12f + 0.11f * i);
     for (int y = 0; y < VH; y += 40) cv.drawLine(lx, y + 7 * (i & 1), lx + 1.5f, y + 36 + 7 * (i & 1), RGB(66, 50, 36));
+  }
+}
+
+// ---------------------------------------------------------------- the hunter (drawing)
+// The two big rocks in the bottom corners. They are in the background too; the hunter's are drawn again over him.
+struct RockDef { int cx, cy, rx, ry, hx, hy, hrx, hry; uint16_t c, hc; };
+static const RockDef ROCKS[2] = {
+  {40, 314, 34, 22, 32, 305, 16, 8, RGB(92, 90, 94), RGB(128, 126, 130)},
+  {434, 316, 32, 21, 426, 308, 14, 7, RGB(86, 84, 90), RGB(120, 118, 124)},
+};
+static void drawRock(Canvas &c, int i) {
+  const RockDef &r = ROCKS[i];
+  c.fillEllipse(r.cx, r.cy, r.rx, r.ry, r.c);
+  c.fillEllipse(r.hx, r.hy, r.hrx, r.hry, r.hc);
+}
+
+static float critScale(const Critter &c) {
+  return scaleAt(c.y) * (c.k == FAWN ? 0.62f : c.k == BUCK ? 1.0f : c.k == DOE ? 0.92f : c.k == TOM ? 1.0f : 0.85f);
+}
+
+// An animal the hunter got: lying on its back, legs up, X for an eye. Cartoon, no mess.
+static void drawDown(const Critter &c) {
+  Pose p = {c.x, c.y, critScale(c), c.dir};
+  const uint16_t X = RGB(25, 20, 18);
+  if (c.k <= FAWN) {
+    const bool buck = c.k == BUCK, fawn = c.k == FAWN;
+    const uint16_t body = buck ? RGB(138, 90, 50) : fawn ? RGB(172, 118, 70) : RGB(160, 112, 68);
+    const uint16_t dark = buck ? RGB(100, 64, 36) : fawn ? RGB(135, 90, 52) : RGB(122, 84, 50);
+    static const int8_t L[4][4] = {{-14, -14, -19, -31}, {-7, -15, -11, -32}, {8, -15, 13, -32}, {15, -14, 20, -31}};
+    for (auto &l : L) {
+      cv.drawWideLine(PX(p, l[0]), PY(p, l[1]), PX(p, l[2]), PY(p, l[3]), 3.0f * p.s, dark, dark);
+      cv.fillCircle(PX(p, l[2]), PY(p, l[3]), 1.6f * p.s, RGB(40, 30, 24));
+    }
+    cv.fillEllipse(PX(p, 0), PY(p, -10), 26 * p.s, 9 * p.s, body);
+    cv.fillEllipse(PX(p, 0), PY(p, -13), 20 * p.s, 4 * p.s, RGB(222, 200, 160));
+    cv.fillTriangle(PX(p, -25), PY(p, -14), PX(p, -32), PY(p, -9), PX(p, -25), PY(p, -6), RGB(240, 235, 225));
+    cv.drawWideLine(PX(p, 20), PY(p, -9), PX(p, 29), PY(p, -6), 8 * p.s, body, body);
+    cv.fillCircle(PX(p, 31), PY(p, -6), 5.5f * p.s, body);
+    cv.fillEllipse(PX(p, 37), PY(p, -4), 4.5f * p.s, 3.2f * p.s, RGB(196, 166, 126));
+    cv.fillTriangle(PX(p, 28), PY(p, -9), PX(p, 22), PY(p, -15), PX(p, 30), PY(p, -12), dark);
+    cv.drawLine(PX(p, 30), PY(p, -9), PX(p, 34), PY(p, -5), X);          // X eye
+    cv.drawLine(PX(p, 34), PY(p, -9), PX(p, 30), PY(p, -5), X);
+    if (buck) {
+      const uint16_t ant = RGB(214, 194, 150);
+      cv.drawWideLine(PX(p, 30), PY(p, -11), PX(p, 28), PY(p, -26), 1.7f * p.s, ant, ant);
+      cv.drawWideLine(PX(p, 28), PY(p, -26), PX(p, 22), PY(p, -30), 1.7f * p.s, ant, ant);
+      cv.drawWideLine(PX(p, 29), PY(p, -19), PX(p, 35), PY(p, -24), 1.7f * p.s, ant, ant);
+    }
+  } else {
+    const bool tom = c.k == TOM;
+    const uint16_t body = tom ? RGB(86, 56, 36) : RGB(124, 94, 64), wing = tom ? RGB(62, 40, 28) : RGB(98, 72, 48);
+    const uint16_t legc = RGB(205, 150, 110), neck = tom ? RGB(120, 150, 190) : RGB(168, 140, 118);
+    if (tom) {
+      for (int i = 0; i < 7; i++) {                                         // the fan, spread on the ground
+        const float a = 0.5f + 1.0f * i / 6, ex = -12 - 24 * sinf(a), ey = -9 - 24 * cosf(a) * 0.55f, a2 = 0.5f + 1.0f * (i + 1) / 6;
+        cv.fillTriangle(PX(p, -12), PY(p, -9), PX(p, ex), PY(p, ey), PX(p, -12 - 24 * sinf(a2)), PY(p, -9 - 24 * cosf(a2) * 0.55f), (i & 1) ? RGB(158, 88, 40) : RGB(206, 168, 108));
+      }
+    } else cv.fillTriangle(PX(p, -11), PY(p, -9), PX(p, -25), PY(p, -12), PX(p, -22), PY(p, -4), wing);
+    cv.drawWideLine(PX(p, 2), PY(p, -14), PX(p, -2), PY(p, -27), 2.2f * p.s, legc, legc);       // feet in the air
+    cv.drawWideLine(PX(p, 7), PY(p, -14), PX(p, 5), PY(p, -28), 2.2f * p.s, legc, legc);
+    cv.drawLine(PX(p, -2), PY(p, -27), PX(p, -6), PY(p, -26), legc);
+    cv.drawLine(PX(p, 5), PY(p, -28), PX(p, 9), PY(p, -27), legc);
+    cv.fillEllipse(PX(p, 0), PY(p, -8), 15 * p.s, 8 * p.s, body);
+    cv.fillEllipse(PX(p, -2), PY(p, -11), 10 * p.s, 5 * p.s, wing);
+    cv.drawWideLine(PX(p, 11), PY(p, -8), PX(p, 21), PY(p, -3), 4.2f * p.s, neck, neck);
+    cv.fillCircle(PX(p, 22), PY(p, -3), 3.2f * p.s, neck);
+    cv.fillTriangle(PX(p, 24), PY(p, -4), PX(p, 29), PY(p, -2.5f), PX(p, 24), PY(p, -1.5f), RGB(226, 196, 100));
+    if (tom) cv.fillEllipse(PX(p, 25), PY(p, 0), 1.6f * p.s, 2.5f * p.s, RGB(200, 40, 40));
+    cv.drawLine(PX(p, 21), PY(p, -5), PX(p, 23.5f), PY(p, -2), X);
+    cv.drawLine(PX(p, 23.5f), PY(p, -5), PX(p, 21), PY(p, -2), X);
+  }
+}
+
+static void drawHunter(float t) {
+  const Hunter &h = hunter;
+  if (h.st == H_OFF) return;
+  float rise = h.st == H_RISE ? min(1.0f, h.t / 1.3f) : h.st == H_LOWER ? max(0.0f, 1.0f - h.t / 1.0f) : 1.0f;
+  rise = rise * rise * (3 - 2 * rise);                                  // ease in and out
+  const float s = 1.3f * scaleAt(constrain(h.y, (float)GROUND_MIN, (float)GROUND_MAX + 8));
+  Pose p = {h.x, h.y + (1 - rise) * 50 * s, s, h.dir};                  // sinks behind the rock
+  const uint16_t vest = RGB(238, 110, 22), vestD = RGB(190, 80, 16), pants = RGB(128, 116, 66), boot = RGB(36, 28, 22);
+  const uint16_t skin = RGB(232, 188, 146), gun = RGB(60, 62, 68), wood = RGB(112, 72, 38);
+  const bool aiming = h.st == H_AIM || h.st == H_SHOT, moving = h.st == H_RUN || h.st == H_DRAG;
+  const float gait = h.t * (h.st == H_RUN ? 13.0f : 7.0f);
+
+  for (int n = 0; n < 2; n++) {                                         // legs
+    const float hip = n ? 2.0f : -2.0f, sw = moving ? sinf(gait + n * 3.14f) * 7 : 0, fx = hip + sw;
+    cv.drawWideLine(PX(p, hip), PY(p, -17), PX(p, fx), PY(p, -1), 3.8f * p.s, pants, pants);
+    cv.fillEllipse(PX(p, fx + 1.5f), PY(p, -1), 3.2f * p.s, 1.8f * p.s, boot);
+  }
+  cv.fillEllipse(PX(p, 0), PY(p, -26), 7.2f * p.s, 10 * p.s, vest);     // blaze orange vest
+  cv.drawLine(PX(p, -3), PY(p, -32), PX(p, -3), PY(p, -19), vestD);
+  float hx = 0, hy = 0;                                                 // where his hand is (for the rope)
+  if (aiming) {
+    const float k = (h.st == H_SHOT && h.since < 0.15f) ? 2.0f : 0.0f;  // recoil
+    cv.drawWideLine(PX(p, -3 - k), PY(p, -27), PX(p, 9 - k), PY(p, -30), 3.4f * p.s, wood, wood);
+    cv.drawWideLine(PX(p, 8 - k), PY(p, -30), PX(p, 33 - k), PY(p, -32.5f), 2.2f * p.s, gun, gun);
+    cv.drawWideLine(PX(p, 3), PY(p, -29), PX(p, 18 - k), PY(p, -31), 3.4f * p.s, vestD, vestD);
+    cv.fillCircle(PX(p, 18 - k), PY(p, -31), 1.8f * p.s, skin);
+  } else if (h.st == H_DRAG) {
+    cv.drawWideLine(PX(p, -5), PY(p, -38), PX(p, -1), PY(p, -12), 2.4f * p.s, gun, gun);       // rifle slung on his back
+    cv.drawWideLine(PX(p, 3), PY(p, -27), PX(p, 11), PY(p, -21), 3.4f * p.s, vestD, vestD);
+    hx = PX(p, 11); hy = PY(p, -21);
+    cv.fillCircle(hx, hy, 1.8f * p.s, skin);
+  } else {
+    cv.drawWideLine(PX(p, 0), PY(p, -20), PX(p, 22), PY(p, -33), 2.4f * p.s, gun, gun);         // rifle carried
+    cv.drawWideLine(PX(p, 3), PY(p, -27), PX(p, 10), PY(p, -23), 3.4f * p.s, vestD, vestD);
+    cv.fillCircle(PX(p, 10), PY(p, -23), 1.8f * p.s, skin);
+  }
+  cv.fillCircle(PX(p, 3), PY(p, -37), 4.8f * p.s, skin);                // head, eye, orange cap
+  cv.fillCircle(PX(p, 5.5f), PY(p, -37.5f), 0.9f * p.s, RGB(15, 12, 10));
+  cv.fillEllipse(PX(p, 3), PY(p, -40.5f), 5.4f * p.s, 3.2f * p.s, vest);
+  cv.fillTriangle(PX(p, 6), PY(p, -40), PX(p, 12), PY(p, -38.5f), PX(p, 6), PY(p, -37.5f), vestD);
+
+  if (h.st == H_DRAG) {                                                 // the rope to what he is dragging
+    const Critter &a = crit[h.tgt];
+    cv.drawWideLine(hx, hy, a.x + h.dragDir * (a.k <= FAWN ? 22 : 12) * scaleAt(a.y), a.y - 7, 1.4f, RGB(150, 120, 70), RGB(150, 120, 70));
+  }
+  const bool nearRock = h.st != H_RUN && h.st != H_DRAG ? true : fabsf(h.x - ROCKS[h.side].cx) < ROCKS[h.side].rx;
+  if (nearRock) drawRock(cv, h.side);                                   // he is behind it
+
+  if (h.since < 2.4f) {                                                 // the shot: flash, smoke, BANG
+    if (h.since < 0.14f) {
+      cv.fillCircle(h.sx, h.sy, 7, RGB(255, 226, 120));
+      cv.fillCircle(h.sx, h.sy, 4, RGB(255, 255, 235));
+      for (int k = 0; k < 5; k++) {
+        const float a = (k - 2) * 0.5f;
+        cv.drawWideLine(h.sx, h.sy, h.sx + h.dir * 18 * cosf(a), h.sy + 18 * sinf(a), 2.5f, RGB(255, 226, 120), RGB(255, 226, 120));
+      }
+    }
+    for (int j = 0; j < 4; j++) {
+      const float age = h.since - 0.06f * j;
+      if (age <= 0 || age >= 2.4f) continue;
+      cv.fillCircle(h.sx + h.dir * (age * 16 + j * 2), h.sy - age * 12, 3 + age * 7, mix(228, 228, 234, 150, 158, 176, age / 2.4f));
+    }
+    if (h.since < 0.5f) {
+      cv.setTextDatum(MC_DATUM);
+      cv.setTextColor(RGB(60, 30, 10)); cv.drawString("BANG!", h.sx + h.dir * 30 + 1, h.sy - 22 + 1, FONT_BIG);
+      cv.setTextColor(RGB(255, 236, 140)); cv.drawString("BANG!", h.sx + h.dir * 30, h.sy - 22, FONT_BIG);
+    }
   }
 }
 
@@ -648,11 +914,14 @@ static void drawScene(float t) {
       cv.fillEllipse(f.x, f.y - f.z, 1.7f, 1.1f, RGB(236, 190, 60));
       cv.drawPixel(f.x - 1, f.y - f.z - 1, RGB(255, 240, 170));
     }
-  for (int i = 0; i < NCRIT; i++) drawShadow(crit[order[i]]);
+  for (int i = 0; i < NCRIT; i++) if (crit[order[i]].m != HIDDEN) drawShadow(crit[order[i]]);
   for (int i = 0; i < NCRIT; i++) {
     const Critter &c = crit[order[i]];
-    if (c.k <= FAWN) drawDeer(c, t); else drawTurkey(c, t);
+    if (c.m == HIDDEN) continue;
+    if (c.m == DOWN) drawDown(c);
+    else if (c.k <= FAWN) drawDeer(c, t); else drawTurkey(c, t);
   }
+  drawHunter(t);
   for (auto &l : leaves) {
     float s = sinf(t * 3 + l.ph);
     cv.fillEllipse(l.x, l.y, 2.6f, 1.2f + 0.9f * fabsf(s), l.c);
@@ -772,8 +1041,7 @@ static void renderBackground(Canvas &c) {
     float hgt = 5 + (y - 214) * 0.05f;
     c.drawLine(x, y, x - 2, y - hgt, g); c.drawLine(x, y, x, y - hgt - 2, g); c.drawLine(x, y, x + 2, y - hgt, g);
   }
-  c.fillEllipse(36, 312, 30, 14, RGB(92, 90, 94)); c.fillEllipse(30, 306, 14, 6, RGB(128, 126, 130));
-  c.fillEllipse(436, 314, 26, 12, RGB(86, 84, 90)); c.fillEllipse(430, 309, 12, 5, RGB(120, 118, 124));
+  drawRock(c, 0); drawRock(c, 1);                 // the two big rocks, which the hunter hides behind
 }
 
 // ---------------------------------------------------------------- WiFi, web page, OTA
@@ -807,6 +1075,9 @@ button,a.b{background:#b8742e;color:#fff;border:0;border-radius:8px;padding:9px 
 <label>Alarm loudness <input type="range" id="alvol" min="1" max="100" style="vertical-align:middle;width:50%"> <span id="alvv"></span></label>
 <button id="apply">Apply</button> <button id="altest">Test alarm</button> <button id="alstop">Stop alarm</button> <small id="amsg"></small>
 <div><small>A minute before, the woods silently brighten like a sunrise and every animal stops to look; at the set time the chime starts over a big clock. You can also tap the time on the screen to set it. The alarm sounds even if the woods are muted.</small></div></div>
+<div class="c"><b>Hunter</b><br><label><input type="checkbox" id="hunt"> The hunter visits now and then</label>
+<button onclick="fetch('/api/hunter')">Send the hunter</button>
+<div><small>He hides behind a rock in a bottom corner, pops up and shoots. A miss sends every animal running; sometimes he gets the big buck or the tom and drags it off, and it wanders back later. Tap a rock on the screen to call him too.</small></div></div>
 <div class="c"><b>Screen</b><br><button onclick="fetch('/api/rot')">Flip screen 180&deg;</button>
 <button onclick="fetch('/api/corn')">Drop corn</button>
 <label><input type="checkbox" id="swaprb"> Swap red/blue (RGB / BGR)</label>
@@ -829,7 +1100,7 @@ $('s').innerHTML=s.ssid+' ('+s.rssi+' dBm)<br>'+s.ip+' / '+s.host+'.local<br>up 
 $('now').textContent=s.now+(s.ntp?'  (internet time)':'');
 if(!s.ntp&&!window.timeSent){window.timeSent=1;fetch('/api/settime?epoch='+Math.floor(Date.now()/1000),{method:'POST'})}
 $('alstat').textContent=['','sunrise starting…','RINGING','snoozed'][s.alstate]||(s.almiss?'last alarm was not stopped':'');
-$('inv').checked=s.inv;$('swaprb').checked=s.swaprb;
+$('inv').checked=s.inv;$('swaprb').checked=s.swaprb;$('hunt').checked=s.hunt;
 if(document.activeElement!==$('vl')){$('snd').checked=s.snd;$('vl').value=s.vol;$('vv').textContent=s.vol}
 if(!busy&&!dirty){$('alon').checked=s.alon;const t=s.atime.split(':');$('al_h').value=t[0];$('al_m').value=t[1];
 for(let i=0;i<7;i++)$('ad'+i).checked=!!((s.adays>>i)&1);$('alsnz').value=s.asnz;$('alvol').value=s.avol;$('alvv').textContent=s.avol;
@@ -843,6 +1114,7 @@ const snd=()=>fetch('/api/snd?on='+($('snd').checked?1:0)+'&vol='+$('vl').value)
 $('snd').onchange=snd;$('vl').oninput=()=>{$('vv').textContent=$('vl').value;snd()};
 const col=()=>fetch('/api/set?inv='+($('inv').checked?1:0)+'&swaprb='+($('swaprb').checked?1:0),{method:'POST'});
 $('inv').onchange=col;$('swaprb').onchange=col;
+$('hunt').onchange=()=>fetch('/api/set?hunt='+($('hunt').checked?1:0),{method:'POST'});
 load();setInterval(load,3000);
 </script></body></html>)HTML";
 
@@ -851,13 +1123,13 @@ static String statusJson() {
   ssid.replace("\\", ""); ssid.replace("\"", "");
   char tbuf[16], dbuf[24];
   clockStrings(tbuf, sizeof(tbuf), dbuf, sizeof(dbuf));
-  char b[840];
+  char b[880];
   snprintf(b, sizeof(b),
            "{\"version\":\"%s\",\"board\":\"%s\",\"ssid\":\"%s\",\"rssi\":%d,\"ip\":\"%s\",\"host\":\"%s\",\"uptime\":%lu,\"fps\":%.1f,\"rot\":%d,"
-           "\"snd\":%s,\"vol\":%d,\"now\":\"%s  %s\",\"timeset\":%s,\"ntp\":%s,\"tz\":\"%s\",\"dfmt\":%d,\"h24\":%s,\"inv\":%s,\"swaprb\":%s,"
+           "\"snd\":%s,\"vol\":%d,\"now\":\"%s  %s\",\"timeset\":%s,\"ntp\":%s,\"tz\":\"%s\",\"dfmt\":%d,\"h24\":%s,\"inv\":%s,\"swaprb\":%s,\"hunt\":%s,"
            "\"alon\":%s,\"atime\":\"%02d:%02d\",\"adays\":%d,\"asnz\":%d,\"avol\":%d,\"alstate\":%d,\"almiss\":%s}",
            FW_VERSION, BOARD_NAME, ssid.c_str(), WiFi.RSSI(), WiFi.localIP().toString().c_str(), g_host.c_str(), millis() / 1000UL, g_fps, g_rot,
-           g_snd ? "true" : "false", (int)g_vol, tbuf, dbuf, timeIsSet() ? "true" : "false", ntpSynced() ? "true" : "false", g_tz.c_str(), g_datefmt, g_h24 ? "true" : "false", g_invert ? "true" : "false", g_swaprb ? "true" : "false",
+           g_snd ? "true" : "false", (int)g_vol, tbuf, dbuf, timeIsSet() ? "true" : "false", ntpSynced() ? "true" : "false", g_tz.c_str(), g_datefmt, g_h24 ? "true" : "false", g_invert ? "true" : "false", g_swaprb ? "true" : "false", g_hunt ? "true" : "false",
            g_alOn ? "true" : "false", g_alMin / 60, g_alMin % 60, g_alDays, g_alSnz, g_alVol, (int)alState, alMissed ? "true" : "false");
   return String(b);
 }
@@ -899,6 +1171,7 @@ static void setupWeb() {
   server.on("/api/set", HTTP_ANY, []() {
     int v;
     if (numArg("h24", 0, 1, v)) g_h24 = v != 0;
+    if (numArg("hunt", 0, 1, v)) g_hunt = v != 0;
     if (numArg("dfmt", 0, 4, v)) g_datefmt = v;
     if (numArg("alon", 0, 1, v)) { g_alOn = v != 0; alFiredDay = -1; }
     if (numArg("adays", 0, 127, v)) g_alDays = v;
@@ -940,6 +1213,11 @@ static void setupWeb() {
     g_rot = g_rot == 1 ? 3 : 1;
     prefs.putInt("rot", g_rot);
     halApplyRotation();
+    server.send(200, "application/json", "{\"ok\":true}");
+  });
+  server.on("/api/hunter", HTTP_ANY, []() {       // send the hunter now; o=miss|buck|tom forces the outcome (testing)
+    String o = server.arg("o");
+    startHunter(-1, o == "miss" ? -1 : o == "buck" ? 0 : o == "tom" ? 4 : -2);
     server.send(200, "application/json", "{\"ok\":true}");
   });
   server.on("/api/corn", HTTP_ANY, []() { spawnCorn(random(60, VW - 60), random(GROUND_MIN + 10, GROUND_MAX - 10)); server.send(200, "application/json", "{\"ok\":true}"); });
@@ -1032,6 +1310,7 @@ void setup() {
   g_host = prefs.getString("host", DEFAULT_HOST);
   g_snd = prefs.getBool("snd", true);
   g_vol = constrain(prefs.getInt("vol", 60), 0, 100);
+  g_hunt = prefs.getBool("hunt", true);
   g_h24 = prefs.getBool("h24", false); g_tz = prefs.getString("tz", g_tz); g_datefmt = constrain(prefs.getInt("dfmt", 0), 0, 4);
   g_alOn = prefs.getBool("alon", false); g_alMin = constrain(prefs.getInt("almin", 7 * 60), 0, 1439); g_alDays = prefs.getInt("aldays", 0x7F) & 0x7F;
   g_alSnz = constrain(prefs.getInt("alsnz", 9), 1, 30); g_alVol = constrain(prefs.getInt("alvol", 70), 1, 100);
@@ -1073,6 +1352,7 @@ void setup() {
   for (auto &c : corn) c.on = false;
   initClockFallback();
   connectWifi();
+  hunter.next = millis() + 90000;               // the first visit about a minute and a half after start
 }
 
 void loop() {
@@ -1121,6 +1401,8 @@ void loop() {
       alPanelTouch(wx, wy, press, rep, now);
     } else if (wx > VW - 190 && wy < 72) {
       if (press) { alPanel = true; alPanelAt = now; }                // tap the time to set the alarm
+    } else if (g_hunt && press && hunter.st == H_OFF && wy > 286 && (wx < 76 || wx > 392)) {
+      startHunter(wx < 76 ? 0 : 1);                                  // tap a rock to call the hunter
     } else if (press || now - lastCorn > 350) {                      // touch scatters corn
       lastCorn = now;
       spawnCorn(wx, max(wy, (float)GROUND_MIN));

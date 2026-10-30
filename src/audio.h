@@ -6,6 +6,7 @@ void audioDing();                       // start the feed sound
 void audioAlarm(int level);               // alarm-clock tone, 0 = off .. 100 (independent of the tank volume and mute)
 bool audioAlarmOn();
 void audioCash();                       // cash register sound (the diver appears)
+void audioShot();                       // a rifle shot with echoes (the hunter fires); follows mute and volume
 void audioLamb();                       // speaker test: plays "Mary Had a Little Lamb" (ignores mute and volume)
 void audioBubMode(int m, int g);              // CYD only: try bubble variants (m: 0 off, else on; g: playback gain 1..16, 1 = the file exactly as it is at volume 60)
 #ifdef BOARD_CYD28

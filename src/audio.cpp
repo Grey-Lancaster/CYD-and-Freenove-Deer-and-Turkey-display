@@ -57,6 +57,33 @@ static void addAlarm(int16_t *out, int n) {
   }
 }
 
+// A rifle shot, synthesised: a noise crack, a low boom, then two fading echoes off the hills (16 kHz).
+static volatile uint32_t g_shotPos = 0xFFFFFFFF;
+void audioShot() { g_shotPos = 0; }
+static int32_t shotSample(uint32_t n) {
+  const float t = n / 16000.0f;
+  static uint32_t rnd = 777;
+  rnd = rnd * 1664525u + 1013904223u;
+  const float noise = ((int32_t)(rnd >> 16) - 32768) / 32768.0f;
+  float v = expf(-t * 40.0f) * noise * 0.9f                 // the crack
+          + expf(-t * 11.0f) * 0.7f * sinC(70.0f * t);      // the boom
+  for (int k = 1; k <= 2; k++) {                            // echoes
+    const float u = t - 0.38f * k;
+    if (u > 0) v += expf(-u * 14.0f) * noise * (0.3f / k) + expf(-u * 7.0f) * 0.25f * sinC(60.0f * u) / k;
+  }
+  return (int32_t)(v * 20000.0f);
+}
+static void addShot(int16_t *out, int n) {
+  uint32_t p = g_shotPos;
+  if (p == 0xFFFFFFFF) return;
+  for (int i = 0; i < n; i++) {
+    if (p >= 16000 * 1.6f) { g_shotPos = 0xFFFFFFFF; return; }
+    if (g_snd && !g_asleep && !g_isNight) out[i] = (int16_t)constrain(out[i] + (shotSample(p) * (int32_t)g_vol) / 60, -32768, 32767);
+    p++;
+  }
+  g_shotPos = p;
+}
+
 #ifdef BOARD_CYD28
 void audioBubbles44(int16_t *out, int n) {
   static const uint8_t *pcm = nullptr; static size_t len = 0, pos = 0;
@@ -87,6 +114,7 @@ void audioBubbles44(int16_t *out, int n) {
 void audioMix(int16_t *out, int n) {                           // the ambience is the separate 44.1 kHz stream; this is the chime only
   memset(out, 0, n * sizeof(int16_t));
   addAlarm(out, n);
+  addShot(out, n);
 }
 #else
 void audioMix(int16_t *out, int n) {
@@ -100,5 +128,6 @@ void audioMix(int16_t *out, int n) {
     if (on && ++idx >= len) idx = 0;
   }
   addAlarm(out, n);
+  addShot(out, n);
 }
 #endif
