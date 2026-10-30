@@ -22,7 +22,7 @@
 #include "wifi_setup.h"
 #include "audio.h"
 
-#define FW_VERSION "1.1.0"
+#define FW_VERSION "1.1.1"
 
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite frame = TFT_eSprite(&tft);    // Freenove: the whole frame
@@ -140,8 +140,10 @@ struct Hunter {
   bool hit;
   int force;            // -2 random, -1 miss, else the critter index that gets shot (for testing)
   uint32_t next;        // millis() of the next automatic visit
+  bool want;            // a visit someone asked for (web page, rock tap), waiting until the animals are all back
+  int wantSide, wantForce;
 };
-Hunter hunter = {H_OFF, 0, 99, 0, 46, 314, 0, 0, 1, -1, 1, false, -2, 90000};
+Hunter hunter = {H_OFF, 0, 99, 0, 46, 314, 0, 0, 1, -1, 1, false, -2, 90000, false, -1, -2};
 static inline bool hunterAlert() { return hunter.st == H_AIM || (hunter.st == H_SHOT && hunter.t < 0.12f); }
 
 // A tap drops a pile of kernels, heaped toward the middle.
@@ -268,6 +270,21 @@ static void hunterDone(uint32_t now) {
   hunter.next = now + (180 + random(240)) * 1000UL;      // the next visit in 3 to 7 minutes
 }
 
+// He only comes out when every animal is on the screen: none hiding, running, or still on its way back in.
+static bool allBack() {
+  for (int i = 0; i < NCRIT; i++) {
+    const Critter &c = crit[i];
+    if (c.m == HIDDEN || c.m == FLEE || c.m == DOWN || c.x < 8 || c.x > VW - 8) return false;
+  }
+  return true;
+}
+
+// Ask for a visit (web page, rock tap): it waits behind the rock until the animals are all back.
+static void callHunter(int side, int force = -2) {
+  if (hunter.st != H_OFF) return;
+  hunter.want = true; hunter.wantSide = side; hunter.wantForce = force;
+}
+
 static bool onScreen(const Critter &c) { return c.m != HIDDEN && c.m != DOWN && c.x > 12 && c.x < VW - 12; }
 
 // The shot: 40% a miss, 30% the big buck, 30% the tom. Everyone else runs for it.
@@ -291,7 +308,11 @@ static void hunterFires() {
 static void updateHunter(float dt) {
   const uint32_t now = millis();
   if (hunter.st == H_OFF) {
-    if (g_hunt && !alActive() && now >= hunter.next) startHunter(-1);
+    const bool due = g_hunt && now >= hunter.next;
+    if ((hunter.want || due) && !alActive() && allBack()) {      // wait until every animal is back on the screen
+      startHunter(hunter.want ? hunter.wantSide : -1, hunter.want ? hunter.wantForce : -2);
+      hunter.want = false;
+    }
     return;
   }
   if (alActive()) {                          // the alarm wins: the hunter leaves and anything he got walks back soon
@@ -1126,10 +1147,10 @@ static String statusJson() {
   char b[880];
   snprintf(b, sizeof(b),
            "{\"version\":\"%s\",\"board\":\"%s\",\"ssid\":\"%s\",\"rssi\":%d,\"ip\":\"%s\",\"host\":\"%s\",\"uptime\":%lu,\"fps\":%.1f,\"rot\":%d,"
-           "\"snd\":%s,\"vol\":%d,\"now\":\"%s  %s\",\"timeset\":%s,\"ntp\":%s,\"tz\":\"%s\",\"dfmt\":%d,\"h24\":%s,\"inv\":%s,\"swaprb\":%s,\"hunt\":%s,"
+           "\"snd\":%s,\"vol\":%d,\"now\":\"%s  %s\",\"timeset\":%s,\"ntp\":%s,\"tz\":\"%s\",\"dfmt\":%d,\"h24\":%s,\"inv\":%s,\"swaprb\":%s,\"hunt\":%s,\"hst\":%d,"
            "\"alon\":%s,\"atime\":\"%02d:%02d\",\"adays\":%d,\"asnz\":%d,\"avol\":%d,\"alstate\":%d,\"almiss\":%s}",
            FW_VERSION, BOARD_NAME, ssid.c_str(), WiFi.RSSI(), WiFi.localIP().toString().c_str(), g_host.c_str(), millis() / 1000UL, g_fps, g_rot,
-           g_snd ? "true" : "false", (int)g_vol, tbuf, dbuf, timeIsSet() ? "true" : "false", ntpSynced() ? "true" : "false", g_tz.c_str(), g_datefmt, g_h24 ? "true" : "false", g_invert ? "true" : "false", g_swaprb ? "true" : "false", g_hunt ? "true" : "false",
+           g_snd ? "true" : "false", (int)g_vol, tbuf, dbuf, timeIsSet() ? "true" : "false", ntpSynced() ? "true" : "false", g_tz.c_str(), g_datefmt, g_h24 ? "true" : "false", g_invert ? "true" : "false", g_swaprb ? "true" : "false", g_hunt ? "true" : "false", (int)hunter.st,
            g_alOn ? "true" : "false", g_alMin / 60, g_alMin % 60, g_alDays, g_alSnz, g_alVol, (int)alState, alMissed ? "true" : "false");
   return String(b);
 }
@@ -1217,7 +1238,7 @@ static void setupWeb() {
   });
   server.on("/api/hunter", HTTP_ANY, []() {       // send the hunter now; o=miss|buck|tom forces the outcome (testing)
     String o = server.arg("o");
-    startHunter(-1, o == "miss" ? -1 : o == "buck" ? 0 : o == "tom" ? 4 : -2);
+    callHunter(-1, o == "miss" ? -1 : o == "buck" ? 0 : o == "tom" ? 4 : -2);
     server.send(200, "application/json", "{\"ok\":true}");
   });
   server.on("/api/corn", HTTP_ANY, []() { spawnCorn(random(60, VW - 60), random(GROUND_MIN + 10, GROUND_MAX - 10)); server.send(200, "application/json", "{\"ok\":true}"); });
@@ -1402,7 +1423,7 @@ void loop() {
     } else if (wx > VW - 190 && wy < 72) {
       if (press) { alPanel = true; alPanelAt = now; }                // tap the time to set the alarm
     } else if (g_hunt && press && hunter.st == H_OFF && wy > 286 && (wx < 76 || wx > 392)) {
-      startHunter(wx < 76 ? 0 : 1);                                  // tap a rock to call the hunter
+      callHunter(wx < 76 ? 0 : 1);                                   // tap a rock to call the hunter (he waits for the animals)
     } else if (press || now - lastCorn > 350) {                      // touch scatters corn
       lastCorn = now;
       spawnCorn(wx, max(wy, (float)GROUND_MIN));
