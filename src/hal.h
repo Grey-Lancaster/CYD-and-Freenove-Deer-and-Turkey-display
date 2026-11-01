@@ -15,6 +15,7 @@ void halApplyRotation();        // after g_rot changed
 void halApplyColors();          // after g_invert / g_swaprb changed
 void halTouchBegin();           // may run an on-screen calibration the first time (CYD)
 bool halTouch(int &x, int &y);  // panel pixel coordinates of the current touch, in the current rotation
+bool halTouchCal(float out[6]);   // the stored touch calibration (CYD: sx = a*rx + b*ry + c, sy = d*rx + e*ry + f); false elsewhere
 void halRecalibrateTouch();     // forget calibration and restart (CYD); no-op elsewhere
 void halAudioStart();           // sets up the speaker path and starts the looping audio task
 void halApplySound();           // after g_snd changed

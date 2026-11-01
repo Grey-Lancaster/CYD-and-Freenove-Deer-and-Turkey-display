@@ -21,12 +21,13 @@
 #include "hal.h"
 #include "wifi_setup.h"
 #include "audio.h"
+#include "motion.h"
 
 // On-screen language: English or Spanish (chosen on the first WiFi screen, or with EN/ES on the web page).
 // Spanish is plain ASCII on the screen (the built-in fonts have no accents).
 static inline bool es() { return wifiLangEs(); }
 
-#define FW_VERSION "1.1.7"
+#define FW_VERSION "2.0.1"
 
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite frame = TFT_eSprite(&tft);    // Freenove: the whole frame
@@ -42,7 +43,15 @@ volatile bool g_snd = true;
 volatile bool g_sBub = true, g_sDiv = false, g_sFeed = false;
 int g_rot = DEFAULT_ROT;
 volatile bool g_asleep = false;
-volatile bool g_isNight = false;
+volatile bool g_isNight = false;   // inside the night window: screen and sound off
+bool g_motion = false;             // Wi-Fi motion sensing: the screen sleeps when nobody is around
+int g_mmin = 10;                   // minutes without motion before sleeping
+int g_msens = 5;                   // 1..10
+bool g_night = false;              // night mode enabled
+int g_nstart = 22 * 60;            // minutes after midnight the screen turns off
+int g_nend = 7 * 60;               // minutes after midnight it turns back on
+static uint32_t nightWakeUntil = 0;   // a touch / BOOT lights the screen for a minute at night
+static uint32_t lastActivity = 0;
 bool g_invert = false;
 bool g_swaprb = DEFAULT_SWAPRB;
 
@@ -54,6 +63,8 @@ static float curT = 0;
 
 // Clock, date and alarm settings (persisted in NVS, editable from the web page)
 bool g_h24 = false;                // 24-hour clock
+bool g_auto = false;               // automatic corn
+int g_aint = 60;                   // seconds between automatic piles
 bool g_hunt = true;               // the hunter visits now and then (web page switch)
 String g_tz = "EST5EDT,M3.2.0,M11.1.0";   // POSIX TZ string
 int g_datefmt = 0;                 // 0 Tue 10/20/26, 1 Tue 20/10/26, 2 Tue 2026-10-20, 3 Tue, Oct 20, 4 hidden
@@ -75,6 +86,9 @@ static void saveSettings() {
   prefs.putBool("h24", g_h24); prefs.putString("tz", g_tz); prefs.putInt("dfmt", g_datefmt);
   prefs.putBool("invert", g_invert); prefs.putBool("swaprb", g_swaprb);
   prefs.putBool("hunt", g_hunt);
+  prefs.putBool("acorn", g_auto); prefs.putInt("aint", g_aint);
+  prefs.putBool("motion", g_motion); prefs.putInt("mmin", g_mmin); prefs.putInt("msens", g_msens);
+  prefs.putBool("night", g_night); prefs.putInt("nstart", g_nstart); prefs.putInt("nend", g_nend);
   prefs.putBool("alon", g_alOn); prefs.putInt("almin", g_alMin); prefs.putInt("aldays", g_alDays); prefs.putInt("alsnz", g_alSnz); prefs.putInt("alvol", g_alVol);
 }
 
@@ -346,7 +360,7 @@ static void updateHunter(float dt) {
       const float dx = gx - hunter.x, dy = (a.y + 2) - hunter.y;
       hunter.dir = dx >= 0 ? 1 : -1;
       if (fabsf(dx) > 3) hunter.x += hunter.dir * min(95.0f * dt, fabsf(dx));
-      hunter.y += constrain(dy, -1.0f, 1.0f) * 70 * dt;
+      hunter.y += constrain(dy, -70 * dt, 70 * dt);          // never step past the animal's line (at 5 fps he hopped over it forever)
       if (fabsf(dx) <= 3 && fabsf(dy) < 3) { hunter.st = H_DRAG; hunter.t = 0; hunter.dir = hunter.dragDir; }
       break;
     }
@@ -366,6 +380,14 @@ static void updateHunter(float dt) {
 }
 
 static void updateWorld(float dt, float t) {
+  static uint32_t nextCorn = 0;
+  if (g_auto) {
+    const uint32_t nowMs = millis();
+    if (nextCorn == 0 || nowMs >= nextCorn) {
+      if (nextCorn != 0) spawnCorn(random(60, VW - 60), random(GROUND_MIN + 10, GROUND_MAX - 10));
+      nextCorn = nowMs + (uint32_t)g_aint * 1000UL;
+    }
+  } else nextCorn = 0;
   updateHunter(dt);
   for (int i = 0; i < NCRIT; i++) updateCritter(i, dt);
   for (auto &c : corn) {
@@ -694,7 +716,26 @@ static void setClockEpoch(uint32_t epoch) {
 static bool ntpSynced() { return sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED; }
 
 // Time and date text in the chosen formats (date is empty until the clock is set, or when hidden).
+static void clockStringsNow(char *buf, size_t bn, char *date, size_t dn);
+// The text is worked out at most four times a second and shared by every strip of a frame, so one odd
+// reading can never put a different box on part of the screen; a missed reading keeps the last good text.
 static void clockStrings(char *buf, size_t bn, char *date, size_t dn) {
+  static char lb[16], ld[24];
+  static uint32_t at = 0;
+  static bool have = false;
+  const uint32_t now = millis();
+  if (!have || now - at >= 250) {
+    char nb[16], nd[24];
+    clockStringsNow(nb, sizeof(nb), nd, sizeof(nd));
+    if (nd[0] || !have || g_datefmt == 4 || !timeIsSet()) { strcpy(lb, nb); strcpy(ld, nd); }
+    else strcpy(lb, nb);                       // time is set but the date failed to read once: keep the date shown
+    at = now; have = true;
+  }
+  strlcpy(buf, lb, bn);
+  strlcpy(date, ld, dn);
+}
+
+static void clockStringsNow(char *buf, size_t bn, char *date, size_t dn) {
   int h, mi;
   date[0] = 0;
   struct tm tmv;
@@ -731,7 +772,15 @@ static void drawClock() {
   char buf[16], date[24];
   clockStrings(buf, sizeof(buf), date, sizeof(date));
   const float tw = cv.s->textWidth(buf, 4) / cv.sx, dw = date[0] ? cv.s->textWidth(date, 2) / cv.sx : 0;
-  const float bell = g_alOn ? 22 : 0, w = max(tw + bell, dw) + 16;
+  // The plaque only grows (a "1:05 AM" or a short weekday must not shrink it, or it jumps every minute);
+  // it starts over when a setting that changes the text changes.
+  static float holdW = 0;
+  static int holdSig = -1;
+  const int sig = (g_h24 ? 1 : 0) | (g_alOn ? 2 : 0) | (g_datefmt << 2) | (es() ? 64 : 0) | (date[0] ? 128 : 0);
+  if (sig != holdSig) { holdSig = sig; holdW = 0; }
+  const float bell = g_alOn ? 22 : 0;
+  holdW = max(holdW, max(max(tw, cv.s->textWidth(g_h24 ? "00:00" : "00:00 AM", 4) / cv.sx) + bell, dw));
+  const float w = holdW + 16;
   const float h = (date[0] ? DATE_Y + 16 / cv.sy : TIME_Y + 28 / cv.sy) + 4;
   cv.fillRoundRect(VW - 4 - w, 2, w, h, 8, RGB(104, 140, 186));
   cv.drawRoundRect(VW - 4 - w, 2, w, h, 8, RGB(70, 102, 148));
@@ -765,6 +814,72 @@ static void alSnooze(uint32_t now) { alState = AL_SNOOZE; alSnoozeUntil = now + 
 static void alTest(uint32_t now) { alRampLen = 8000; alT0 = now; alState = AL_RAMP; alMissed = false; }
 static float alProgress(uint32_t now) { return alState == AL_RAMP ? min(1.0f, (now - alT0) / (float)alRampLen) : 1.0f; }
 
+// ---------------------------------------------------------------- motion sleep and night mode (from the fish tank)
+static void applyBacklight() { halBacklight(!(g_asleep || g_isNight)); }
+
+static void wakeScreen(uint8_t cause) {
+  if (!g_asleep) return;
+  g_asleep = false;
+  motionLogEvent(false, cause | (g_isNight ? 0x80 : 0));      // 0x80: night mode, the screen stays dark regardless
+  applyBacklight();
+  lastActivity = millis();
+}
+
+// With motion sensing on, the screen sleeps after g_mmin minutes without motion or touch and wakes on either.
+// If sensing is not running (offline, warming up) that counts as activity, so it never sleeps blind.
+static void updateSleep() {
+  static uint32_t last = 0;
+  uint32_t now = millis();
+  if (now - last < 250) return;
+  last = now;
+  if (!g_motion) { wakeScreen(4); return; }
+  // Right after the screen goes dark the radio environment changes (backlight current), which looked like motion:
+  // ignore motion for a while after sleeping and relearn the quiet level.
+  static uint32_t sleepAt = 0;
+  bool motionNow = motionDetected() && !(g_asleep && now - sleepAt < 20000);
+  if (!motionReady() || motionNow) {
+    lastActivity = now;
+    if (g_asleep) motionRebaseline();
+    wakeScreen(motionNow ? 1 : 5);
+    return;
+  }
+  if (!g_asleep && now - lastActivity >= (uint32_t)g_mmin * 60000UL) {
+    g_asleep = true;
+    sleepAt = now;
+    motionRebaseline();
+    motionLogEvent(true, g_isNight ? 0x80 : 0);
+    applyBacklight();
+  }
+}
+
+// Night mode: screen and sound off between two times of day (local time; needs the clock to be set).
+static bool inNightWindow() {
+  if (!g_night) return false;
+  struct tm t;
+  if (!getLocalTime(&t, 0)) return false;
+  int now = t.tm_hour * 60 + t.tm_min;
+  if (g_nstart == g_nend) return false;
+  return g_nstart < g_nend ? (now >= g_nstart && now < g_nend) : (now >= g_nstart || now < g_nend);
+}
+
+static void updateNight(uint32_t now) {
+  static uint32_t last = 0;
+  if (now - last < 1000) return;
+  last = now;
+  bool night = inNightWindow() && now >= nightWakeUntil;
+  if (night != g_isNight) { g_isNight = night; applyBacklight(); if (!night) lastActivity = now; }
+}
+
+// A touch or BOOT while it is dark lights the screen for a minute.
+static bool nightWake(uint32_t now) {
+  if (!g_isNight) return false;
+  nightWakeUntil = now + 60000;
+  g_isNight = false;
+  applyBacklight();
+  lastActivity = now;
+  return true;
+}
+
 static void updateAlarm(uint32_t now) {
   static uint32_t last = 0;
   if (now - last < 250) return;
@@ -786,6 +901,9 @@ static void updateAlarm(uint32_t now) {
   if (alActive()) {
     const float e = min(1.0f, (now - alT0) / 30000.0f);
     alSetSound(alState == AL_RAMP ? 0 : (int)(g_alVol * (0.6f + 0.4f * e)));      // silent sunrise lead-in; the chime starts at the set time
+    nightWakeUntil = now + 5000; lastActivity = now;                              // the alarm lights the screen even at night or asleep
+    if (g_isNight) { g_isNight = false; applyBacklight(); }
+    if (g_asleep) wakeScreen(6);
   }
   if (alPanel && now - alPanelAt > 30000) { alPanel = false; saveSettings(); }
 }
@@ -1107,40 +1225,76 @@ button,a.b{background:#b8742e;color:#fff;border:0;border-radius:8px;padding:9px 
 <label><span data-i="alvol">Alarm loudness</span> <input type="range" id="alvol" min="1" max="100" style="vertical-align:middle;width:50%"> <span id="alvv"></span></label>
 <button id="apply" data-i="apply">Apply</button> <button id="altest" data-i="altest">Test alarm</button> <button id="alstop" data-i="alstop">Stop alarm</button> <small id="amsg"></small>
 <div><small data-i="alnote">A minute before, the woods silently brighten like a sunrise and every animal stops to look; at the set time the chime starts over a big clock. You can also tap the time on the screen to set it. The alarm sounds even if the woods are muted.</small></div></div>
+<div class="c"><b data-i="night">Night mode</b> <small id="nstat"></small>
+<label><input type="checkbox" id="night"> <span data-i="nighton">Screen and sound off at night</span></label>
+<label><span data-i="nstart">Off from</span> <span><select id="nstart_h"></select> : <select id="nstart_m"></select></span></label>
+<label><span data-i="nend">Back on at</span> <span><select id="nend_h"></select> : <select id="nend_m"></select></span></label>
+<small data-i="nnote">Uses the time zone above (the clock must be set). Touch the screen or press BOOT to light it for a minute.</small></div>
+<div class="c"><b data-i="motion">Motion sleep</b> <small data-i="exp">(experimental)</small>
+<label><input type="checkbox" id="motion"> <span data-i="mon">Sleep the screen when nobody is around</span></label>
+<label><span data-i="mmin">Sleep after (minutes)</span> <input type="number" id="mmin" min="1" max="240" style="width:90px"></label>
+<label><span data-i="msens">Sensitivity</span> <input type="range" id="msens" min="1" max="10" style="vertical-align:middle;width:45%"> <span id="msv"></span></label>
+<small id="mlive"></small>
+<div id="mlog" style="margin-top:8px;font-size:14px"></div>
+<button id="mclr" data-i="mclr">Clear log</button> <button id="apply2" data-i="apply">Apply</button> <small id="amsg2"></small></div>
 <div class="c"><b data-i="hunter">Hunter</b><br><label><input type="checkbox" id="hunt"> <span data-i="hunton">The hunter visits now and then</span></label>
 <button onclick="fetch('/api/hunter')" data-i="sendh">Send the hunter</button>
 <div><small data-i="huntnote">He hides behind a rock in a bottom corner, pops up and shoots. A miss sends every animal running; sometimes he gets the big buck or the tom and drags it off, and it wanders back later. Tap a rock on the screen to call him too.</small></div></div>
 <div class="c"><b data-i="screen">Screen</b><br><button onclick="fetch('/api/rot')" data-i="flip">Flip screen 180&deg;</button>
 <button onclick="fetch('/api/corn')" data-i="corn">Drop corn</button>
+<label><input type="checkbox" id="auto"> <span data-i="auto">Drop corn by itself</span></label>
+<label><span data-i="aint">Every (seconds)</span> <input type="number" id="aint" min="5" max="3600" style="width:90px"></label>
 <label><input type="checkbox" id="swaprb"> <span data-i="swap">Swap red/blue (RGB / BGR)</span></label>
 <label><input type="checkbox" id="inv"> <span data-i="inv">Invert colours (negative)</span></label>
 <small data-i="colnote">If the colours look wrong, such as blue skin tones or a negative image, try these. A white screen usually means the other CYD build.</small></div>
+<div class="c"><button id="shot" data-i="shot">Screenshot</button> <label style="display:inline"><input type="checkbox" id="live"> <span data-i="live">live view</span></label>
+<small data-i="shm">(the display pauses for a second while it copies)</small>
+<canvas id="cv" width="480" height="320" style="display:none;width:100%;margin-top:10px;border-radius:8px"></canvas>
+<a id="dl" class="b" style="display:none"></a></div>
+<div class="c"><label><span data-i="hostn">Hostname</span> <input id="host" maxlength="31" style="width:55%"></label>
+<small><span data-i="hostnote">letters, digits and dashes &mdash; reachable as</span> <b id="hl"></b>.local</small><br><br>
+<button id="hsave" data-i="hsave">Save &amp; reboot</button> <small id="hmsg"></small></div>
 <div class="c"><b data-i="maint">Maintenance</b><br><a class="b" href="/update" data-i="fw">Firmware update</a>
 <button data-i="forget" onclick="if(confirm(t('cforget')))fetch('/api/wifi/forget')">Forget WiFi</button>
+<button id="recal" data-i="recal" style="display:none" onclick="if(confirm(t('crecal')))fetch('/api/recal')">Recalibrate touch</button>
 <button data-i="restart" onclick="if(confirm(t('crestart')))fetch('/api/reboot')">Restart</button></div>
 <script>
 const $=i=>document.getElementById(i);let dirty=0,busy=0,S={};
 const L={en:{status:'Status',sound:'Sound',sndon:'Woods sounds on',vol:'Volume',dt:'Date & time',tz:'Time zone',tz_e:'US Eastern',tz_c:'US Central',tz_m:'US Mountain',tz_az:'US Arizona',tz_p:'US Pacific',tz_ak:'US Alaska',tz_h:'US Hawaii',tz_uk:'UK / Ireland',tz_ce:'Central Europe',tz_ee:'Eastern Europe',tz_in:'India',tz_cn:'China',tz_jp:'Japan',tz_au:'Australia East',
 df:'Date format',df0:'Tue 10/20/26 (month/day)',df1:'Tue 20/10/26 (day/month)',df2:'Tue 2026-10-20',df3:'Tue, Oct 20',df4:'Hide the date',h24:'24-hour time',settime:'Set time from this device',
 al:'Alarm clock',alon:'Alarm on',wake:'Wake at',snz:'Snooze (minutes)',alvol:'Alarm loudness',apply:'Apply',altest:'Test alarm',alstop:'Stop alarm',
+auto:'Drop corn by itself',aint:'Every (seconds)',shot:'Screenshot',live:'live view',shm:'(the display pauses for a second while it copies)',dl:'Download PNG',hostn:'Hostname',hostnote:'letters, digits and dashes — reachable as',hsave:'Save & reboot',rebooting:'Rebooting…',
+night:'Night mode',nighton:'Screen and sound off at night',nstart:'Off from',nend:'Back on at',nnote:'Uses the time zone above (the clock must be set). Touch the screen or press BOOT to light it for a minute.',nnow:'(dark now)',motion:'Motion sleep',exp:'(experimental)',mon:'Sleep the screen when nobody is around',mmin:'Sleep after (minutes)',msens:'Sensitivity',mclr:'Clear log',mwarm:'sensor warming up…',mscore:'motion score ',mmoving:' ● moving',mquiet:' (quiet)',masleep:' · screen asleep',mnone:'No sleep/wake events yet.',slept:'☾ slept',woke:'☀ woke',mseen:'○ motion seen',mqt:'○ quiet',upm:'up ',nightdark:' · night mode, screen stays dark',cs:['no motion','motion','touch','BOOT button','setting turned off','sensor offline','alarm'],
 alnote:'A minute before, the woods silently brighten like a sunrise and every animal stops to look; at the set time the chime starts over a big clock. You can also tap the time on the screen to set it. The alarm sounds even if the woods are muted.',
 hunter:'Hunter',hunton:'The hunter visits now and then',sendh:'Send the hunter',huntnote:'He hides behind a rock in a bottom corner, pops up and shoots. A miss sends every animal running; sometimes he gets the big buck or the tom and drags it off, and it wanders back later. Tap a rock on the screen to call him too.',
 screen:'Screen',flip:'Flip screen 180°',corn:'Drop corn',swap:'Swap red/blue (RGB / BGR)',inv:'Invert colours (negative)',colnote:'If the colours look wrong, such as blue skin tones or a negative image, try these. A white screen usually means the other CYD build.',
-maint:'Maintenance',fw:'Firmware update',forget:'Forget WiFi',restart:'Restart',cforget:'Forget WiFi and restart?',crestart:'Restart?',
+maint:'Maintenance',fw:'Firmware update',forget:'Forget WiFi',recal:'Recalibrate touch',crecal:'Restart and touch five crosshairs to recalibrate the screen?',restart:'Restart',cforget:'Forget WiFi and restart?',crestart:'Restart?',
 up:'up',min:'min',inet:'  (internet time)',a1:'sunrise starting…',a2:'RINGING',a3:'snoozed',amiss:'last alarm was not stopped',applied:'Applied ✓',tset:'time set ✓',
 days:['Sun','Mon','Tue','Wed','Thu','Fri','Sat']},
 es:{status:'Estado',sound:'Sonido',sndon:'Sonidos del bosque',vol:'Volumen',dt:'Fecha y hora',tz:'Zona horaria',tz_e:'EE. UU. Este',tz_c:'EE. UU. Centro',tz_m:'EE. UU. Montaña',tz_az:'EE. UU. Arizona',tz_p:'EE. UU. Pacífico',tz_ak:'EE. UU. Alaska',tz_h:'EE. UU. Hawái',tz_uk:'Reino Unido / Irlanda',tz_ce:'Europa central',tz_ee:'Europa oriental',tz_in:'India',tz_cn:'China',tz_jp:'Japón',tz_au:'Australia este',
 df:'Formato de fecha',df0:'Mar 10/20/26 (mes/día)',df1:'Mar 20/10/26 (día/mes)',df2:'Mar 2026-10-20',df3:'Mar, 20 Oct',df4:'Ocultar la fecha',h24:'Hora de 24 horas',settime:'Poner la hora desde este dispositivo',
 al:'Despertador',alon:'Alarma activada',wake:'Despertar a las',snz:'Posponer (minutos)',alvol:'Volumen de la alarma',apply:'Aplicar',altest:'Probar alarma',alstop:'Detener alarma',
+auto:'Echar maíz solo',aint:'Cada (segundos)',shot:'Captura de pantalla',live:'vista en vivo',shm:'(la pantalla se detiene un segundo mientras se copia)',dl:'Descargar PNG',hostn:'Nombre de host',hostnote:'letras, números y guiones — accesible como',hsave:'Guardar y reiniciar',rebooting:'Reiniciando…',
+night:'Modo nocturno',nighton:'Pantalla y sonido apagados de noche',nstart:'Apagar desde las',nend:'Encender a las',nnote:'Usa la zona horaria de arriba (el reloj debe estar en hora). Toca la pantalla o pulsa BOOT para encenderla un minuto.',nnow:'(a oscuras ahora)',motion:'Reposo por movimiento',exp:'(experimental)',mon:'Apagar la pantalla cuando no hay nadie',mmin:'Apagar después de (minutos)',msens:'Sensibilidad',mclr:'Borrar registro',mwarm:'el sensor se está calentando…',mscore:'nivel de movimiento ',mmoving:' ● en movimiento',mquiet:' (quieto)',masleep:' · pantalla dormida',mnone:'Aún no hay eventos de reposo o despertar.',slept:'☾ se durmió',woke:'☀ despertó',mseen:'○ movimiento detectado',mqt:'○ quieto',upm:'activo ',nightdark:' · modo nocturno, la pantalla sigue apagada',cs:['sin movimiento','movimiento','toque','botón BOOT','ajuste desactivado','sensor sin conexión','alarma'],
 alnote:'Un minuto antes, el bosque se ilumina en silencio como un amanecer y todos los animales se detienen a mirar; a la hora indicada suena el timbre sobre un reloj grande. También puedes tocar la hora en la pantalla para ajustarla. La alarma suena aunque el bosque esté silenciado.',
 hunter:'Cazador',hunton:'El cazador visita de vez en cuando',sendh:'Enviar al cazador',huntnote:'Se esconde tras una roca en una esquina inferior, aparece y dispara. Si falla, todos los animales salen corriendo; a veces atrapa al gran ciervo o al pavo y se lo lleva arrastrando, y vuelve a pasearse más tarde. Toca una roca en la pantalla para llamarlo también.',
 screen:'Pantalla',flip:'Girar pantalla 180°',corn:'Echar maíz',swap:'Intercambiar rojo/azul (RGB / BGR)',inv:'Invertir colores (negativo)',colnote:'Si los colores se ven mal, por ejemplo tonos de piel azules o una imagen en negativo, prueba estas opciones. Una pantalla blanca suele significar que es la otra versión de CYD.',
-maint:'Mantenimiento',fw:'Actualizar firmware',forget:'Olvidar WiFi',restart:'Reiniciar',cforget:'¿Olvidar el WiFi y reiniciar?',crestart:'¿Reiniciar?',
+maint:'Mantenimiento',fw:'Actualizar firmware',forget:'Olvidar WiFi',recal:'Recalibrar el tacto',crecal:'¿Reiniciar y tocar cinco cruces para recalibrar la pantalla?',restart:'Reiniciar',cforget:'¿Olvidar el WiFi y reiniciar?',crestart:'¿Reiniciar?',
 up:'activo',min:'min',inet:'  (hora de internet)',a1:'amanecer en curso…',a2:'SONANDO',a3:'pospuesta',amiss:'la última alarma no se detuvo',applied:'Aplicado ✓',tset:'hora ajustada ✓',
 days:['Dom','Lun','Mar','Mié','Jue','Vie','Sáb']}};
 let lang=(navigator.language||'').toLowerCase().startsWith('es')?'es':'en',langSet=0;
 const t=k=>(L[lang]&&L[lang][k]!==undefined)?L[lang][k]:L.en[k];
-const mark=()=>{dirty=1;$('amsg').textContent=''};
+const mark=()=>{dirty=1;$('amsg').textContent='';$('amsg2').textContent=''};
+(function(){let h='',m='';for(let i=0;i<24;i++)h+='<option value="'+i+'">'+String(i).padStart(2,'0')+'</option>';for(let i=0;i<60;i++)m+='<option value="'+i+'">'+String(i).padStart(2,'0')+'</option>';
+['nstart','nend'].forEach(p=>{$(p+'_h').innerHTML=h;$(p+'_m').innerHTML=m})})();
+function fillHours(){const m=$('h24').checked;
+[['al_h',v=>String(v).padStart(2,'0')],['nstart_h',v=>v],['nend_h',v=>v]].forEach(([id,val])=>{const e=$(id),cur=e.value;let o='';
+for(let i=0;i<24;i++)o+='<option value="'+val(i)+'">'+(m?String(i).padStart(2,'0'):(i%12||12)+(i<12?' AM':' PM'))+'</option>';
+e.innerHTML=o;if(cur!=='')e.value=cur})}
+const getTm=p=>$(p+'_h').value+':'+$(p+'_m').value;
+const setTm=(p,v)=>{const a=v.split(':');$(p+'_h').value=+a[0];$(p+'_m').value=+a[1]};
+async function mlog(){try{const a=await(await fetch('/api/motionlog')).json();
+$('mlog').innerHTML=a.length?a.map(e=>((e.c&128)?(e.e?t('mseen'):t('mqt')):(e.e?t('woke'):t('slept')))+' · '+(e.w||t('upm')+Math.floor(e.up/60)+' '+t('min'))+' · '+t('cs')[e.c&127]+((e.c&128)?t('nightdark'):'')).join('<br>'):'<small>'+t('mnone')+'</small>'}catch(e){}}
 (function(){let h='',m='';for(let i=0;i<24;i++)h+='<option>'+String(i).padStart(2,'0')+'</option>';
 for(let i=0;i<60;i++)m+='<option>'+String(i).padStart(2,'0')+'</option>';
 $('al_h').innerHTML=h;$('al_m').innerHTML=m})();
@@ -1148,14 +1302,16 @@ function fillDays(){let d='';t('days').forEach((n,i)=>{const c=$('ad'+i);d+='<la
 $('aldays').innerHTML=d;for(let i=0;i<7;i++){$('ad'+i).onchange=mark}}
 function applyLang(){document.documentElement.lang=lang;
 document.querySelectorAll('[data-i]').forEach(e=>e.textContent=t(e.dataset.i));
-$('lEN').classList.toggle('on',lang==='en');$('lES').classList.toggle('on',lang==='es');fillDays();show()}
+$('lEN').classList.toggle('on',lang==='en');$('lES').classList.toggle('on',lang==='es');fillHours();fillDays();show();mlog()}
 async function setLang(l){lang=l;langSet=1;applyLang();try{await fetch('/api/set?lang='+l,{method:'POST'})}catch(e){}}
 $('lEN').onclick=()=>setLang('en');$('lES').onclick=()=>setLang('es');
 const getT=()=>$('al_h').value+':'+$('al_m').value;
 function show(){const s=S;if(s.version===undefined)return;
-$('v').textContent='v'+s.version+' - '+s.board;
+$('v').textContent='v'+s.version+' - '+s.board;$('hl').textContent=s.host;if(document.activeElement!==$('host'))$('host').value=s.host;
 $('s').innerHTML=s.ssid+' ('+s.rssi+' dBm)<br>'+s.ip+' / '+s.host+'.local<br>'+t('up')+' '+Math.round(s.uptime/60)+' '+t('min')+', '+s.fps.toFixed(1)+' fps';
 $('now').textContent=s.now+(s.ntp?t('inet'):'');
+$('nstat').textContent=s.isnight?t('nnow'):'';
+$('mlive').textContent=s.motion?(s.mready?t('mscore')+s.mscore+(s.mon?t('mmoving'):t('mquiet'))+(s.asleep?t('masleep'):''):t('mwarm')):'';
 $('alstat').textContent=['',t('a1'),t('a2'),t('a3')][s.alstate]||(s.almiss?t('amiss'):'')}
 async function load(){const s=await(await fetch('/api/status')).json();S=s;
 if(!langSet&&s.lang&&s.lang!==lang){lang=s.lang;applyLang()}else show();langSet=1;
@@ -1164,17 +1320,37 @@ $('inv').checked=s.inv;$('swaprb').checked=s.swaprb;$('hunt').checked=s.hunt;
 if(document.activeElement!==$('vl')){$('snd').checked=s.snd;$('vl').value=s.vol;$('vv').textContent=s.vol}
 if(!busy&&!dirty){$('alon').checked=s.alon;const tt=s.atime.split(':');$('al_h').value=tt[0];$('al_m').value=tt[1];
 for(let i=0;i<7;i++)$('ad'+i).checked=!!((s.adays>>i)&1);$('alsnz').value=s.asnz;$('alvol').value=s.avol;$('alvv').textContent=s.avol;
-$('tz').value=s.tz;$('dfmt').value=s.dfmt;$('h24').checked=s.h24}}
-async function send(){busy=1;await fetch('/api/set?tz='+encodeURIComponent($('tz').value)+'&dfmt='+$('dfmt').value+'&h24='+($('h24').checked?1:0)+'&alon='+($('alon').checked?1:0)+'&atime='+getT()+'&adays='+[0,1,2,3,4,5,6].reduce((a,i)=>a+($('ad'+i).checked?1<<i:0),0)+'&asnz='+$('alsnz').value+'&avol='+$('alvol').value,{method:'POST'});busy=0;dirty=0;$('amsg').textContent=t('applied');load()}
-['tz','dfmt','h24','alon','al_h','al_m','alsnz'].forEach(i=>{$(i).onchange=mark;$(i).oninput=mark});
+$('tz').value=s.tz;$('dfmt').value=s.dfmt;$('h24').checked=s.h24;fillHours();
+$('auto').checked=s.auto;if(document.activeElement!==$('aint'))$('aint').value=s.aint;
+$('night').checked=s.night;setTm('nstart',s.nstart);setTm('nend',s.nend);$('motion').checked=s.motion;$('mmin').value=s.mmin;$('msens').value=s.msens;$('msv').textContent=s.msens}}
+async function send(){busy=1;await fetch('/api/set?tz='+encodeURIComponent($('tz').value)+'&dfmt='+$('dfmt').value+'&h24='+($('h24').checked?1:0)+'&alon='+($('alon').checked?1:0)+'&atime='+getT()+'&adays='+[0,1,2,3,4,5,6].reduce((a,i)=>a+($('ad'+i).checked?1<<i:0),0)+'&asnz='+$('alsnz').value+'&avol='+$('alvol').value+'&night='+($('night').checked?1:0)+'&nstart='+getTm('nstart')+'&nend='+getTm('nend')+'&motion='+($('motion').checked?1:0)+'&mmin='+$('mmin').value+'&msens='+$('msens').value,{method:'POST'});busy=0;dirty=0;$('amsg').textContent=t('applied');$('amsg2').textContent=t('applied');load()}
+$('h24').addEventListener('change',()=>{fillHours()});
+['tz','dfmt','h24','alon','al_h','al_m','alsnz','night','nstart_h','nstart_m','nend_h','nend_m','motion','mmin','msens'].forEach(i=>{$(i).onchange=mark;$(i).oninput=mark});
 $('alvol').oninput=()=>{$('alvv').textContent=$('alvol').value;mark()};
-$('apply').onclick=send;$('altest').onclick=()=>fetch('/api/alarm?cmd=test',{method:'POST'});$('alstop').onclick=()=>fetch('/api/alarm?cmd=stop',{method:'POST'});
+$('apply').onclick=send;$('apply2').onclick=send;$('msens').oninput=()=>{$('msv').textContent=$('msens').value;mark()};$('mclr').onclick=async()=>{await fetch('/api/motionlog/clear',{method:'POST'});mlog()};setInterval(mlog,5000);$('altest').onclick=()=>fetch('/api/alarm?cmd=test',{method:'POST'});$('alstop').onclick=()=>fetch('/api/alarm?cmd=stop',{method:'POST'});
 $('settime').onclick=async()=>{await fetch('/api/settime?epoch='+Math.floor(Date.now()/1000),{method:'POST'});$('tmsg').textContent=t('tset');load()};
 const snd=()=>fetch('/api/snd?on='+($('snd').checked?1:0)+'&vol='+$('vl').value);
 $('snd').onchange=snd;$('vl').oninput=()=>{$('vv').textContent=$('vl').value;snd()};
 const col=()=>fetch('/api/set?inv='+($('inv').checked?1:0)+'&swaprb='+($('swaprb').checked?1:0),{method:'POST'});
 $('inv').onchange=col;$('swaprb').onchange=col;
+$('auto').onchange=()=>fetch('/api/set?auto='+($('auto').checked?1:0),{method:'POST'});
+$('aint').onchange=()=>{if($('aint').value)fetch('/api/set?aint='+$('aint').value,{method:'POST'})};
+async function shot(){const r=await fetch('/api/frame',{cache:'no-store'});const W=+r.headers.get('X-W')||480,H=+r.headers.get('X-H')||320;const b=new Uint8Array(await r.arrayBuffer());
+if(b.length!=W*H*2)return;const cv=$('cv');cv.width=W;cv.height=H;const x=cv.getContext('2d'),im=x.createImageData(W,H);
+for(let i=0,o=0;i<b.length;i+=2,o+=4){const v=(b[i]<<8)|b[i+1];im.data[o]=((v>>11)&31)*255/31;im.data[o+1]=((v>>5)&63)*255/63;im.data[o+2]=(v&31)*255/31;im.data[o+3]=255}
+x.putImageData(im,0,0);cv.style.display='block';
+cv.toBlob(bl=>{const a=$('dl');a.href=URL.createObjectURL(bl);a.download='deerhunt-'+new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)+'.png';a.textContent=t('dl');a.style.display='inline-block'})}
+$('shot').onclick=shot;
+$('live').onchange=()=>{clearInterval(window.lv);if($('live').checked){shot();window.lv=setInterval(shot,2500)}};
+$('hsave').onclick=async()=>{const h=$('host').value.trim().toLowerCase();
+const r=await fetch('/api/host?host='+encodeURIComponent(h),{method:'POST'});
+if(!r.ok){$('hmsg').textContent=(await r.json()).error;return}
+$('hmsg').textContent=t('rebooting');
+const cands=[location.origin,'http://'+h+'.local'];
+setTimeout(()=>{const poll=setInterval(async()=>{for(const o of cands){try{const s=await(await fetch(o+'/api/status',{cache:'no-store'})).json();
+if(s.host===h){clearInterval(poll);location.href=o+'/';return}}catch(e){}}},2000)},4000)};
 $('hunt').onchange=()=>fetch('/api/set?hunt='+($('hunt').checked?1:0),{method:'POST'});
+fetch('/api/touchcal').then(r=>r.json()).then(j=>{if(j.cal)$('recal').style.display=''}).catch(()=>{});
 applyLang();load();setInterval(load,3000);
 </script></body></html>)HTML";
 
@@ -1183,14 +1359,17 @@ static String statusJson() {
   ssid.replace("\\", ""); ssid.replace("\"", "");
   char tbuf[16], dbuf[24];
   clockStrings(tbuf, sizeof(tbuf), dbuf, sizeof(dbuf));
-  char b[960];
+  char b[1400];
   snprintf(b, sizeof(b),
            "{\"version\":\"%s\",\"board\":\"%s\",\"ssid\":\"%s\",\"rssi\":%d,\"ip\":\"%s\",\"host\":\"%s\",\"uptime\":%lu,\"fps\":%.1f,\"rot\":%d,"
            "\"snd\":%s,\"vol\":%d,\"now\":\"%s  %s\",\"timeset\":%s,\"ntp\":%s,\"tz\":\"%s\",\"dfmt\":%d,\"h24\":%s,\"inv\":%s,\"swaprb\":%s,\"hunt\":%s,\"hst\":%d,"
-           "\"alon\":%s,\"atime\":\"%02d:%02d\",\"adays\":%d,\"asnz\":%d,\"avol\":%d,\"alstate\":%d,\"almiss\":%s,\"lang\":\"%s\"}",
+           "\"alon\":%s,\"atime\":\"%02d:%02d\",\"adays\":%d,\"asnz\":%d,\"avol\":%d,\"alstate\":%d,\"almiss\":%s,\"lang\":\"%s\","
+           "\"night\":%s,\"nstart\":\"%02d:%02d\",\"nend\":\"%02d:%02d\",\"isnight\":%s,\"motion\":%s,\"mmin\":%d,\"msens\":%d,\"mon\":%s,\"mready\":%s,\"mscore\":%.2f,\"asleep\":%s,\"auto\":%s,\"aint\":%d}",
            FW_VERSION, BOARD_NAME, ssid.c_str(), WiFi.RSSI(), WiFi.localIP().toString().c_str(), g_host.c_str(), millis() / 1000UL, g_fps, g_rot,
            g_snd ? "true" : "false", (int)g_vol, tbuf, dbuf, timeIsSet() ? "true" : "false", ntpSynced() ? "true" : "false", g_tz.c_str(), g_datefmt, g_h24 ? "true" : "false", g_invert ? "true" : "false", g_swaprb ? "true" : "false", g_hunt ? "true" : "false", (int)hunter.st,
-           g_alOn ? "true" : "false", g_alMin / 60, g_alMin % 60, g_alDays, g_alSnz, g_alVol, (int)alState, alMissed ? "true" : "false", es() ? "es" : "en");
+           g_alOn ? "true" : "false", g_alMin / 60, g_alMin % 60, g_alDays, g_alSnz, g_alVol, (int)alState, alMissed ? "true" : "false", es() ? "es" : "en",
+           g_night ? "true" : "false", g_nstart / 60, g_nstart % 60, g_nend / 60, g_nend % 60, g_isNight ? "true" : "false",
+           g_motion ? "true" : "false", g_mmin, g_msens, motionDetected() ? "true" : "false", motionReady() ? "true" : "false", motionScore(), g_asleep ? "true" : "false", g_auto ? "true" : "false", g_aint);
   return String(b);
 }
 
@@ -1205,6 +1384,13 @@ static bool numArg(const char *name, int lo, int hi, int &out) {
 
 #ifdef BOARD_CYD28
 static void renderStrip(int i);
+// Between the strips, remember a touch that would be over before the main loop looks again.
+static bool g_latch = false;
+static int g_latchX, g_latchY;
+static void latchTouch() {
+  int x, y;
+  if (!g_latch && halTouch(x, y)) { g_latch = true; g_latchX = x; g_latchY = y; }
+}
 #endif
 
 static void setupWeb() {
@@ -1233,6 +1419,16 @@ static void setupWeb() {
     if (server.hasArg("lang")) wifiSetLangEs(server.arg("lang") == "es");   // kept by the WiFi library, not our prefs
     if (numArg("h24", 0, 1, v)) g_h24 = v != 0;
     if (numArg("hunt", 0, 1, v)) g_hunt = v != 0;
+    if (numArg("auto", 0, 1, v)) g_auto = v != 0;
+    if (numArg("aint", 5, 3600, v)) g_aint = v;
+    if (numArg("motion", 0, 1, v)) g_motion = v != 0;
+    if (numArg("mmin", 1, 240, v)) g_mmin = v;
+    if (numArg("msens", 1, 10, v)) g_msens = v;
+    if (numArg("night", 0, 1, v)) g_night = v != 0;
+    for (int k = 0; k < 2; k++) {
+      String z = server.arg(k ? "nend" : "nstart"); z.trim(); int c = z.indexOf(':');
+      if (c > 0) { int h = z.substring(0, c).toInt(), mi = z.substring(c + 1).toInt(); if (h >= 0 && h < 24 && mi >= 0 && mi < 60) (k ? g_nend : g_nstart) = h * 60 + mi; }
+    }
     if (numArg("dfmt", 0, 4, v)) g_datefmt = v;
     if (numArg("alon", 0, 1, v)) { g_alOn = v != 0; alFiredDay = -1; }
     if (numArg("adays", 0, 127, v)) g_alDays = v;
@@ -1269,6 +1465,29 @@ static void setupWeb() {
     if (server.hasArg("vol")) { g_vol = constrain(server.arg("vol").toInt(), 0, 100); prefs.putInt("vol", g_vol); }
     halApplySound();
     server.send(200, "application/json", "{\"ok\":true}");
+  });
+  server.on("/api/recal", HTTP_ANY, []() {      // forget the touch calibration and restart into the five crosshairs (CYD)
+    server.send(200, "text/plain", "OK");
+    delay(200);
+    halRecalibrateTouch();
+  });
+  server.on("/api/host", HTTP_ANY, []() {         // rename the board (mDNS / OTA name); restarts to apply
+    String h = server.arg("host"); h.trim(); h.toLowerCase();
+    bool ok = h.length() >= 1 && h.length() <= 31 && h[0] != '-' && h[h.length() - 1] != '-';
+    for (size_t i = 0; ok && i < h.length(); i++) ok = isalnum((unsigned char)h[i]) || h[i] == '-';
+    if (!ok) { server.send(400, "application/json", "{\"error\":\"letters, digits and - only (1-31 chars)\"}"); return; }
+    prefs.putString("host", h);
+    server.send(200, "application/json", "{\"ok\":true,\"host\":\"" + h + "\"}");
+    restartAt = millis() + 800;
+  });
+  server.on("/api/motionlog", HTTP_GET, []() { server.send(200, "application/json", motionLogJson()); });
+  server.on("/api/motionlog/clear", HTTP_ANY, []() { motionLogClear(); server.send(200, "application/json", "{\"ok\":true}"); });
+  server.on("/api/touchcal", HTTP_GET, []() {   // the stored calibration, for diagnosis
+    float a[6];
+    char b[200];
+    if (halTouchCal(a)) snprintf(b, sizeof(b), "{\"cal\":true,\"aff\":[%.6f,%.6f,%.4f,%.6f,%.6f,%.4f]}", a[0], a[1], a[2], a[3], a[4], a[5]);
+    else snprintf(b, sizeof(b), "{\"cal\":false}");
+    server.send(200, "application/json", b);
   });
   server.on("/api/rot", HTTP_ANY, []() {
     g_rot = g_rot == 1 ? 3 : 1;
@@ -1372,6 +1591,9 @@ void setup() {
   g_snd = prefs.getBool("snd", true);
   g_vol = constrain(prefs.getInt("vol", 60), 0, 100);
   g_hunt = prefs.getBool("hunt", true);
+  g_auto = prefs.getBool("acorn", false); g_aint = constrain(prefs.getInt("aint", 60), 5, 3600);
+  g_motion = prefs.getBool("motion", false); g_mmin = constrain(prefs.getInt("mmin", 10), 1, 240); g_msens = constrain(prefs.getInt("msens", 5), 1, 10);
+  g_night = prefs.getBool("night", false); g_nstart = constrain(prefs.getInt("nstart", 22 * 60), 0, 1439); g_nend = constrain(prefs.getInt("nend", 7 * 60), 0, 1439);
   g_h24 = prefs.getBool("h24", false); g_tz = prefs.getString("tz", g_tz); g_datefmt = constrain(prefs.getInt("dfmt", 0), 0, 4);
   g_alOn = prefs.getBool("alon", false); g_alMin = constrain(prefs.getInt("almin", 7 * 60), 0, 1439); g_alDays = prefs.getInt("aldays", 0x7F) & 0x7F;
   g_alSnz = constrain(prefs.getInt("alsnz", 9), 1, 30); g_alVol = constrain(prefs.getInt("alvol", 70), 1, 100);
@@ -1413,6 +1635,8 @@ void setup() {
   for (auto &c : corn) c.on = false;
   initClockFallback();
   connectWifi();
+  motionBegin();
+  lastActivity = millis();
   hunter.next = millis() + 90000;               // the first visit about a minute and a half after start
 }
 
@@ -1439,13 +1663,18 @@ void loop() {
 
   static bool lastBtn = true;
   bool btn = digitalRead(0);
-  if (!btn && lastBtn) { if (alActive()) alStop(); else infoUntil = (infoUntil > now) ? 0 : now + 20000; }   // BOOT: stop the alarm, else connection info
+  if (!btn && lastBtn) { lastActivity = now; if (alActive()) alStop(); else if (nightWake(now)) {} else if (g_asleep) wakeScreen(3); else infoUntil = (infoUntil > now) ? 0 : now + 20000; }   // BOOT: stop the alarm, else connection info
   lastBtn = btn;
 
   int px, py;
-  const bool touched = halTouch(px, py);
+  bool touched = halTouch(px, py);
+#ifdef BOARD_CYD28
+  if (!touched && g_latch) { touched = true; px = g_latchX; py = g_latchY; }
+  g_latch = false;
+#endif
   static bool wasTouched = false;
   static uint32_t pressAt = 0;
+  if (touched) lastActivity = now;
   const bool press = touched && !wasTouched;
   if (press) pressAt = now;
   wasTouched = touched;
@@ -1453,7 +1682,11 @@ void loop() {
   if (touched && (press || now - lastTouch > 120)) {
     lastTouch = now;
     const float wx = px / cv.sx, wy = max(py / cv.sy, 14.0f);
-    if (alState == AL_RING) {
+    if (nightWake(now)) {
+      // touched in the dark: just light the screen
+    } else if (g_asleep) {
+      wakeScreen(2);                                                 // the first touch only wakes the screen
+    } else if (alState == AL_RING) {
       if (press && wy >= BTN_Y && wy < BTN_Y + BTN_H) {
         if (wx >= BTN_SNZ_X && wx < BTN_SNZ_X + BTN_W) alSnooze(now);
         else if (wx >= BTN_STOP_X && wx < BTN_STOP_X + BTN_W) alStop();
@@ -1462,8 +1695,8 @@ void loop() {
       alPanelTouch(wx, wy, press, rep, now);
     } else if (wx > VW - 190 && wy < 72) {
       if (press) { alPanel = true; alPanelAt = now; }                // tap the time to set the alarm
-    } else if (g_hunt && press && hunter.st == H_OFF && wy > 286 && (wx < 76 || wx > 392)) {
-      callHunter(wx < 76 ? 0 : 1);                                   // tap a rock to call the hunter (he waits for the animals)
+    } else if (g_hunt && press && hunter.st == H_OFF && wy > 262 && (wx < 96 || wx > 372)) {
+      callHunter(wx < 240 ? 0 : 1);                                  // tap a rock to call the hunter (he waits for the animals)
     } else if (press || now - lastCorn > 350) {                      // touch scatters corn
       lastCorn = now;
       spawnCorn(wx, max(wy, (float)GROUND_MIN));
@@ -1471,6 +1704,9 @@ void loop() {
   }
 
   updateAlarm(now);
+  updateNight(now);
+  updateSleep();
+  if (g_asleep || g_isNight) { delay(40); return; }        // screen off: no drawing
   updateWorld(dt, t);
   curT = t;
 
@@ -1483,6 +1719,7 @@ void loop() {
   for (int i = 0; i < PANEL_H / STRIP_H; i++) {
     renderStrip(i);
     strip.pushSprite(0, i * STRIP_H);
+    latchTouch();                                    // a whole frame takes ~200 ms: a short tap would fall between two polls
   }
 #endif
 

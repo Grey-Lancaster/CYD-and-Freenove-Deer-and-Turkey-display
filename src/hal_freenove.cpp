@@ -61,6 +61,7 @@ bool halTouch(int &x, int &y) {
   return true;
 }
 
+bool halTouchCal(float[6]) { return false; }
 void halRecalibrateTouch() {}
 
 void halApplySound() {

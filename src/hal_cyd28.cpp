@@ -154,6 +154,7 @@ static bool rawTouched(RawTouch &p) {
   digitalWrite(XPT2046_CS, LOW);
   int z = xptConvert(0xB1) + 4095 - xptConvert(0xC1);
   if (z < 400) {
+    xptConvert(0xD0);  // power-down again: the pressure reads leave PENIRQ switched off, and halTouch only looks when IRQ is low
     digitalWrite(XPT2046_CS, HIGH);
     return false;
   }
@@ -252,6 +253,12 @@ void halTouchBegin() {
   xptBegin();
   haveAff = loadAff();
   if (!haveAff) calibrate();
+}
+
+bool halTouchCal(float out[6]) {
+  if (!haveAff) return false;
+  memcpy(out, touchAff, sizeof(touchAff));
+  return true;
 }
 
 void halRecalibrateTouch() {
