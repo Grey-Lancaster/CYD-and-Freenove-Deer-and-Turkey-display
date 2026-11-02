@@ -27,7 +27,10 @@
 // Spanish is plain ASCII on the screen (the built-in fonts have no accents).
 static inline bool es() { return wifiLangEs(); }
 
-#define FW_VERSION "2.0.1"
+#define FW_VERSION "2.0.7"
+#ifdef BOARD_CYD28
+#include "esp_partition.h"
+#endif
 
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite frame = TFT_eSprite(&tft);    // Freenove: the whole frame
@@ -1575,8 +1578,49 @@ static void drawInfo(uint32_t now) {
 }
 
 #ifdef BOARD_CYD28
+#ifdef BOARD_CYD28
+// The CYDs have no PSRAM and too little heap for a 150-300 KB background, so the scenery is drawn once into a flash
+// partition ("bgcache", memory-mapped) and each strip starts as a copy of it instead of redrawing every tree.
+static const uint8_t *bgCache = nullptr;
+static void bgCacheInit() {
+  const esp_partition_t *p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x40, "bgcache");
+  const size_t hdr = 4096, stripBytes = (size_t)PANEL_W * STRIP_H * 2, bytes = stripBytes * (PANEL_H / STRIP_H);
+  if (!p || p->size < hdr + bytes) { Serial.println("bgcache: no partition, drawing the scenery every frame"); return; }
+  char want[64];
+  snprintf(want, sizeof(want), "deerhunt-bg %s %s %s", FW_VERSION, __DATE__, __TIME__);   // redraw after every new build
+  spi_flash_mmap_handle_t h;
+  const void *ptr = nullptr;
+  if (esp_partition_mmap(p, 0, hdr + bytes, SPI_FLASH_MMAP_DATA, &ptr, &h) != ESP_OK) { Serial.println("bgcache: mmap failed"); return; }
+  if (memcmp(ptr, want, strlen(want) + 1) != 0) {
+    spi_flash_munmap(h);
+    Serial.println("bgcache: drawing the scenery into flash");
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("Preparing the woods...", 20, 20, 4);
+    if (esp_partition_erase_range(p, 0, (hdr + bytes + 4095) & ~(size_t)4095) != ESP_OK) { Serial.println("bgcache: erase failed"); return; }   // whole 4 KB sectors
+    cv.s = &strip;
+    for (int i = 0; i < PANEL_H / STRIP_H; i++) {
+      cv.oy = i * STRIP_H;
+      renderBackground(cv);
+      if (esp_partition_write(p, hdr + i * stripBytes, strip.getPointer(), stripBytes) != ESP_OK) return;
+    }
+    char hdrBuf[64] = {};
+    memcpy(hdrBuf, want, strlen(want) + 1);
+    if (esp_partition_write(p, 0, hdrBuf, sizeof(hdrBuf)) != ESP_OK) return;   // header last: a half-written cache is never used
+    if (esp_partition_mmap(p, 0, hdr + bytes, SPI_FLASH_MMAP_DATA, &ptr, &h) != ESP_OK) return;
+    if (memcmp(ptr, want, strlen(want) + 1) != 0) return;
+  }
+  bgCache = (const uint8_t *)ptr + hdr;
+  Serial.println("bgcache: ready");
+}
+#endif
+
 static void renderStrip(int i) {
   cv.s = &strip; cv.oy = i * STRIP_H;
+#ifdef BOARD_CYD28
+  if (bgCache) memcpy(strip.getPointer(), bgCache + (size_t)i * PANEL_W * STRIP_H * 2, (size_t)PANEL_W * STRIP_H * 2);
+  else
+#endif
   renderBackground(cv);
   drawScene(curT);
 }
@@ -1628,6 +1672,9 @@ void setup() {
     tft.drawString("Out of memory", 10, 10, 4);
     while (true) delay(1000);
   }
+#ifdef BOARD_CYD28
+  bgCacheInit();
+#endif
 #endif
   randomSeed(esp_random());
   static const uint16_t leafCols[4] = {RGB(204, 100, 34), RGB(226, 160, 48), RGB(168, 64, 30), RGB(190, 130, 40)};
@@ -1719,14 +1766,13 @@ void loop() {
   for (int i = 0; i < PANEL_H / STRIP_H; i++) {
     renderStrip(i);
     strip.pushSprite(0, i * STRIP_H);
-    latchTouch();                                    // a whole frame takes ~200 ms: a short tap would fall between two polls
+    latchTouch();                                // a whole frame takes ~200 ms: a short tap would fall between two polls
   }
 #endif
 
   frames++;
   if (now - fpsT >= 5000) {
     g_fps = frames * 1000.0f / (now - fpsT);
-    Serial.printf("fps: %.1f  heap %u\n", g_fps, (unsigned)ESP.getFreeHeap());
-    frames = 0; fpsT = now;
+    Serial.printf("fps: %.1f  heap %u\n", g_fps, (unsigned)ESP.getFreeHeap());    frames = 0; fpsT = now;
   }
 }

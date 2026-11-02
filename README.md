@@ -10,7 +10,7 @@ Animated autumn woods for the Freenove FNK0104S 4.0", the Freenove 2.8" and the 
 
 Use **Chrome or Edge on a computer**, plug the board in by USB, pick your board in the list, click **Connect**, then **Flash**. No software to install. (Freenove boards: hold BOOT, tap RESET, release BOOT first, and press RESET after flashing. The first start asks you to pick your WiFi on the screen.)
 
-Prefer to download files? The [latest release](../../releases/latest) has a factory file (a new board) and an update file (a board that is already running; keeps WiFi and settings) for each of the four builds.
+Prefer to download files? The [latest release](../../releases/latest) has a factory file (a new board) and an update file (a board that is already running; keeps WiFi and settings) for each of the five builds.
 
 ## What it does
 A buck, two does, a fawn that trails its mother, a tom turkey and two hens wander the forest floor between layered trees, with leaves drifting down. They walk, graze, stop and look around (the tom fans his tail, the deer flick ears and tails). **Touch the screen to drop a pile of corn**: the nearest animals walk over and eat it. A 25 s woods ambience loop (crows, turkeys, birds) plays, with the crickets and hum filtered out.
@@ -32,8 +32,9 @@ A buck, two does, a fawn that trails its mother, a tom turkey and two hens wande
 | `freenove28` | Freenove FNK0104B/AB 2.8", ILI9341, ESP32-S3 |
 | `cyd28` | CYD 2.8", ILI9341, one USB port |
 | `cyd28usb2` | CYD 2.8", ST7789, two USB ports |
+| `cyd40` | Freenove ESP32 Display 4.0" (ESP32-32E, "FNK0103S" docs), ST7796 480x320, resistive touch, no PSRAM |
 
-`pio run -e <env>`. Wrong colours on a CYD almost always means the wrong env (driver); there are also swap red/blue and invert switches on the web page. Pushing a tag like `v1.0.0` makes CI build all four and publish a release with a factory and an update file for each.
+`pio run -e <env>`. Wrong colours on a CYD almost always means the wrong env (driver); there are also swap red/blue and invert switches on the web page. Pushing a tag like `v1.0.0` makes CI build all five and publish a release with a factory and an update file for each.
 
 ## Layout
 - `src/main.cpp` - scene, animals, clock, alarm, web page.
@@ -44,7 +45,7 @@ A buck, two does, a fawn that trails its mother, a tom turkey and two hens wande
 - `tools_build_greyhound.sh` - the author's build-server script (syncs to a server, builds, optionally OTAs); adapt or ignore.
 
 ## Status
-All four envs compile. Run on a Freenove 2.8" and a one-USB CYD (ILI9341) by the author; the Freenove 4.0" and the ST7789 CYD builds have not been tried on hardware. The CYD runs at about 5 fps (the 2.8" Freenove at about 15).
+All five envs compile. Run on a Freenove 2.8", a one-USB CYD (ILI9341) and the Freenove ESP32 Display 4.0" (`cyd40`) by the author; the Freenove S3 4.0" and the ST7789 CYD builds have not been tried on hardware. The CYDs have no PSRAM and draw in strips (the 2.8" about 5 fps, the 4.0" about 6; the 2.8" Freenove about 15). The scenery is drawn once into a small flash partition (`boards/partitions_cyd.csv`) and copied into each strip; a board updated over the air keeps its old partition table, so it redraws the scenery every frame and runs slower until it is reflashed by USB or the web installer.
 
 ## Credits
 The woods ambience is derived from "Rural Pennsylvania wooded ambience background with wild turkeys, Carolina wren, American crow" by **Jon5515** ([freesound.org/s/871327](https://freesound.org/s/871327/)), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Changes: the first 25 seconds, mixed to mono, noise-reduced, with the cricket band filtered out, looped with a crossfade (`design/make_ambience.py`). The CYD copy is also downsampled to 11.025 kHz to fit in flash.

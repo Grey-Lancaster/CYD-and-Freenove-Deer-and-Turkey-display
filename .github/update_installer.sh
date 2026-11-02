@@ -8,13 +8,13 @@ DIST="${2:?usage: update_installer.sh <tag> <dist-dir>}"
 cd "$(git rev-parse --show-toplevel)"
 
 # build env : installer file name (docs/firmware/<name>.bin)
-for env in freenove4 freenove28 cyd28 cyd28usb2; do
+for env in freenove4 freenove28 cyd28 cyd28usb2 cyd40; do
   cp "$DIST/Deer-Hunt-$env-factory.bin" "docs/firmware/deer-hunt-$env.bin"
 done
 
-# the four board choices ("&mdash; vX.Y.Z") and the "Version vX.Y.Z" line
+# the five board choices ("&mdash; vX.Y.Z") and the "Version vX.Y.Z" line
 sed -i -E "/<option value=/ s/&mdash; v[0-9]+(\.[0-9]+)*/\&mdash; $TAG/; s/Version <strong>v[0-9]+(\.[0-9]+)*<\/strong>/Version <strong>$TAG<\/strong>/" docs/index.html
 
 n="$(grep -o "$TAG" docs/index.html | wc -l)"
-[ "$n" -eq 5 ] || { echo "expected 5 version labels in docs/index.html, found $n" >&2; exit 1; }
+[ "$n" -eq 6 ] || { echo "expected 6 version labels in docs/index.html, found $n" >&2; exit 1; }
 echo "installer updated for $TAG"

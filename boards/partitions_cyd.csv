@@ -1,0 +1,8 @@
+# Name,    Type, SubType, Offset,   Size,     Flags
+# 4 MB flash, two OTA slots, and a 448 KB "bgcache" partition that holds the pre-drawn scenery (RGB565: 300 KB at 480x320, 150 KB at 320x240)
+# so the no-PSRAM CYD boards can copy it into each strip instead of redrawing every tree every frame.
+nvs,       data, nvs,     0x9000,   0x5000,
+otadata,   data, ota,     0xe000,   0x2000,
+app0,      app,  ota_0,   0x10000,  0x1C0000,
+app1,      app,  ota_1,   0x1D0000, 0x1C0000,
+bgcache,   data, 0x40,    0x390000, 0x70000,
